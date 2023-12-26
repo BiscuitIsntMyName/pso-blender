@@ -33,6 +33,16 @@ class VertexFormat1(Serializable):
 
 
 @dataclass
+class VertexFormat2(Serializable):
+    x: F32 = 0.0
+    y: F32 = 0.0
+    z: F32 = 0.0
+    nx: F32 = 0.0
+    ny: F32 = 0.0
+    nz: F32 = 0.0
+
+
+@dataclass
 class VertexFormat3(Serializable):
     x: F32 = 0.0
     y: F32 = 0.0
@@ -105,6 +115,10 @@ class VertexFormat7(Serializable):
 class VertexBufferFormat1(Serializable):
     vertices: list[VertexFormat1] = field(default_factory=list)
 
+@dataclass
+class VertexBufferFormat2(Serializable):
+    vertices: list[VertexFormat2] = field(default_factory=list)
+
 
 @dataclass
 class VertexBufferFormat3(Serializable):
@@ -149,6 +163,8 @@ class VertexBufferContainer(Serializable):
         vertex_format = container.vertex_format & 0xffff
         if vertex_format == 1:
             vert_ctor = VertexFormat1
+        elif vertex_format == 2:
+            vert_ctor = VertexFormat2
         elif vertex_format == 3:
             vert_ctor = VertexFormat3
         elif vertex_format == 4:
