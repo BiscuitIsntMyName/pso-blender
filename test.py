@@ -60,6 +60,9 @@ class TestSerialization(unittest.TestCase):
     def test_basic_struct_type_size(self):
         self.assertEqual(MyBasicStruct.type_size(), 12)
     
+    def test_basic_struct_member_offset(self):
+        self.assertEqual(MyBasicStruct.offset_of("z"), 8)
+    
     def test_flex_struct_instance_size(self):
         vertices = [MyBasicStruct(), MyBasicStruct()]
         self.assertEqual(MyFlexStruct(vertices=vertices).instance_size(), 4 + 12 * 2)

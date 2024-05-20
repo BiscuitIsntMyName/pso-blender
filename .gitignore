@@ -1,3 +1,8 @@
 __pycache__
 .vscode
 pso_blender.zip
+pyvenv.cfg
+bin
+lib
+lib64
+include

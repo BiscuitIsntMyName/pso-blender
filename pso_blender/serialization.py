@@ -128,40 +128,42 @@ class Serializable:
         return None
     
     @staticmethod
-    def _offset_visitor(**kwargs) -> bool:
-        (fmt, ctx) = itemgetter("fmt", "ctx")(kwargs)
-        if ctx["filter"](**kwargs):
-            ctx["offsets"].append(ctx["size_sum"])
+    def _member_visitor(**kwargs) -> bool:
+        (value, name, tp, fmt, ctx) = itemgetter("value", "name", "tp", "fmt", "ctx")(kwargs)
+        ctx["members"].append((value, name, tp, fmt, ctx["size_sum"]))
         if fmt:
             ctx["size_sum"] += Numeric.size_of_format(fmt)
         return True
 
     def nonnull_pointer_member_offsets(self) -> list[int]:
-        ctx = {
-            "size_sum": 0,
-            "offsets": [],
-            "filter": lambda **kwargs: kwargs["tp"] is not None and kwargs["tp"] is Numeric.Ptr32 and kwargs["value"] != Numeric.NULLPTR}
-        self._visit(self, ctx, Serializable._offset_visitor)
-        return ctx["offsets"]
-
-    @staticmethod
-    def _size_visitor(**kwargs) -> bool:
-        (fmt, ctx) = itemgetter("fmt", "ctx")(kwargs)
-        if fmt:
-            ctx["size_sum"] += Numeric.size_of_format(fmt)
-        return True
+        ctx = {"size_sum": 0, "members": []}
+        self._visit(self, ctx, Serializable._member_visitor)
+        # "filter": lambda **kwargs: kwargs["tp"] is not None and kwargs["tp"] is Numeric.Ptr32 and kwargs["value"] != Numeric.NULLPTR}
+        return [
+            offset for (value, name, tp, fmt, offset) in ctx["members"]
+            if tp is not None and tp is Numeric.Ptr32 and value != Numeric.NULLPTR
+        ]
+    
+    @classmethod
+    def offset_of(cls, member_name) -> int:
+        ctx = {"size_sum": 0, "members": []}
+        cls._visit(cls, ctx, Serializable._member_visitor)
+        for (value, name, tp, fmt, offset) in ctx["members"]:
+            if name == member_name:
+                return offset
+        raise Exception("Type has no such member '{}'".format(member_name))
 
     def instance_size(self) -> int:
         """Will also include size of data inside any list type members."""
-        ctx = {"size_sum": 0}
-        self._visit(self, ctx, Serializable._size_visitor)
+        ctx = {"size_sum": 0, "members": []}
+        self._visit(self, ctx, Serializable._member_visitor)
         return ctx["size_sum"]
 
     @classmethod
     def type_size(cls) -> int:
         """Similar to sizeof(). Size of lists is considered to be 0."""
-        ctx = {"size_sum": 0}
-        cls._visit(cls, ctx, Serializable._size_visitor)
+        ctx = {"size_sum": 0, "members": []}
+        cls._visit(cls, ctx, Serializable._member_visitor)
         return ctx["size_sum"]
     
     @classmethod
