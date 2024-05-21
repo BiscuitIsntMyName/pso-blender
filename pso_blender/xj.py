@@ -237,7 +237,7 @@ class IndexBufferContainer(Serializable):
     renderstate_args_count: U32 = 0
     index_buffer: Ptr32 = NULLPTR # IndexBuffer
     index_count: U32 = 0
-    unk1: U32 = 0
+    vertex_buffer_index: U32 = 0
 
     @classmethod
     def deserialize_from(cls, buf, offset):

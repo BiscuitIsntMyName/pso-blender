@@ -3,7 +3,7 @@ from struct import pack_into
 import bpy
 from warnings import warn
 from .serialization import Serializable, Numeric, FixedArray, ResizableBuffer
-from . import prs, njcm, xvm, xj, util
+from . import prs, njcm, xvm, xj, util, njm
 from .nj import nj_to_blender_mesh
 from .iff import IffChunk, IffHeader, parse_pof0
 
@@ -203,8 +203,8 @@ def write(bml_path: str, xvm_path: str):
                 next=0xdeadbeef if has_next else NULLPTR)
             
             node_ptr = njcm_chunk.write(mesh_node)
-            mesh_pointer_offset = node_ptr + chunk_header_size + 4
-            next_pointer_offset = node_ptr + chunk_header_size + 0x30
+            mesh_pointer_offset = node_ptr + chunk_header_size + njcm.MeshTreeNode.offset_of("mesh")
+            next_pointer_offset = node_ptr + chunk_header_size + njcm.MeshTreeNode.offset_of("next")
 
             # Make and write mesh
             blender_mesh = obj.to_mesh()
@@ -239,6 +239,29 @@ def write(bml_path: str, xvm_path: str):
             textures_compressed_size=0,
             textures_decompressed_size=0)
         file_desc.serialize_into(bml_buf)
+
+    # Write njm's into bml
+    for collection in objects_by_collection:
+        for action in bpy.data.actions:
+            nmdm_chunk_buf = njm.make_njm(collection.models, action)
+            # Chunk (+POF0) is done
+            files_sum_before = files_buf.offset
+            files_buf.append(nmdm_chunk_buf)
+            chunks_size_sum += len(nmdm_chunk_buf)
+            compressed_size = chunks_size_sum
+
+            # Add padding between files
+            files_buf.grow_to(files_sum_before + util.align_up(compressed_size, file_alignment))
+            files_buf.seek_to_end()
+
+            # Write file descriptions after BML header
+            file_desc = FileDescription(
+                name=list(bytes(collection.name[0:27] + ".njm", "ascii")),
+                compressed_size=compressed_size,
+                decompressed_size=chunks_size_sum,
+                textures_compressed_size=0,
+                textures_decompressed_size=0)
+            file_desc.serialize_into(bml_buf)
     
     # Add padding after file descriptions
     bml_buf.grow_to(util.align_up(bml_header.file_count * 0x40, 0x800))
