@@ -47,8 +47,8 @@ class MeshTree(Serializable):
 
 @dataclass
 class Chunk(Serializable):
-    """I think chunks might be used for view distance"""
-    id: U32 = 0
+    """Chunks are used for view distance"""
+    id: I32 = 0
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -96,17 +96,23 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
     chunk_to_children = dict()
     chunk_flags = 0x00010000
     chunk_counter = 0
+    # Chunk -1 will always be visible
+    always_rendered_chunk = Chunk(
+        id=-1,
+        flags=chunk_flags,
+        static_mesh_tree_count=0,
+        x=0.0,
+        y=0.0,
+        z=0.0)
+    chunk_to_children[always_rendered_chunk] = []
+    # If object is set to be always rendered then put it in chunk -1
+    for obj in objects:
+        if obj.rel_settings.always_rendered:
+            chunk_to_children[always_rendered_chunk].append(obj)
     if len(chunk_markers) < 1:
         # No markers, put all meshes in the same chunk at 0,0,0
         warn("N.REL Warning: No chunk markers found in scene. Placing all meshes in default chunk.")
-        chunk = Chunk(
-            id=chunk_counter,
-            flags=chunk_flags,
-            static_mesh_tree_count=len(objects),
-            x=0.0,
-            y=0.0,
-            z=0.0)
-        chunk_to_children[chunk] = objects
+        chunk_to_children[always_rendered_chunk] = objects
     else:
         # Create a chunk for each marker
         for marker in chunk_markers:
@@ -122,6 +128,8 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             chunk_counter += 1
         # Find each object's nearest chunk
         for obj in objects:
+            if obj.rel_settings.always_rendered:
+                continue
             obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
             nearest_chunk = None
             nearest_dist_sq = float("inf")
@@ -141,9 +149,12 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
                 if radius > max_chunk_radius:
                     warn("N.REL Warning: Object '{}' might be too far away from a chunk marker (expected maximum distance of {:.1f}, was {:.1f}).".format(
                         obj.name, max_chunk_radius, radius))
-        # Discard empty chunks
+        # Set chunk mesh counts
         for chunk in list(chunk_to_children.keys()):
-            if chunk.static_mesh_tree_count < 1:
+            mesh_count = len(chunk_to_children[chunk])
+            chunk.static_mesh_tree_count = mesh_count
+            # Discard empty chunks
+            if mesh_count < 1:
                 del chunk_to_children[chunk]
     return chunk_to_children
 

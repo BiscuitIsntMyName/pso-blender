@@ -15,6 +15,7 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     collision_flags_value1: IntProperty(default=0, subtype="UNSIGNED")
     collision_flags_value2: IntProperty(default=0, subtype="UNSIGNED")
     is_translucent: BoolProperty(name="Translucent", default=False)
+    always_rendered: BoolProperty(name="Always rendered", description="Object will not be affected by view distance and will always be rendered.", default=False)
 
 
 def make_collision_flag_props():
@@ -138,3 +139,4 @@ class MeshRelSettingsPanel(Panel):
         self.layout.use_property_decorate = False
         settings = context.object.rel_settings
         self.layout.prop(settings, "is_chunk")
+        self.layout.prop(settings, "always_rendered")
