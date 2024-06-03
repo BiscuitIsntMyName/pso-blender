@@ -473,12 +473,23 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
 
     normal_type = None
     for mat_slot in obj.material_slots:
-        if mat_slot.material.xj_settings.camera_space_normals:
+        # Lighting requires normals
+        if mat_slot.material.xj_settings.lighting or mat_slot.material.xj_settings.camera_space_normals:
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
             normal_type = int(list(mat_slot.material.xj_settings.normal_type)[0])
             break
-
-    vertex_colors = blender_mesh.color_attributes[0] if len(blender_mesh.color_attributes) > 0 else None
+    
+    if len(blender_mesh.color_attributes) > 0:
+        vertex_colors = blender_mesh.color_attributes[0]
+    elif normal_type is not None:
+        # Effects that need normals usually also need vcol. Let's add a blank white color attribute.
+        vertex_colors = blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "CORNER")
+        for attr in vertex_colors.data:
+            attr.color[0] = 1
+            attr.color[1] = 1
+            attr.color[2] = 1
+    else:
+        vertex_colors = None
     has_vertex_color = bool(vertex_colors)
     has_vertex_alpha = False
     if has_vertex_color:
