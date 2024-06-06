@@ -9,7 +9,7 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     is_crel: BoolProperty(name="C.REL")
     is_rrel: BoolProperty(name="R.REL")
     receives_shadows: BoolProperty(name="Receives shadows", default=True)
-    receives_fog: BoolProperty(name="Affected by fog", default=False)
+    receives_fog: BoolProperty(name="Affected by fog", default=True)
     is_chunk: BoolProperty(name="Chunk marker", description="Object is used as a chunk marker. All meshes are automatically assigned to the nearest chunk marker.", default=False)
     # Can't figure out how to get IntProperty to support a 32bit unsigned value so I'll just split it into two 16bit values
     collision_flags_value1: IntProperty(default=0, subtype="UNSIGNED")

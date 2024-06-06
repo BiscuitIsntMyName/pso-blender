@@ -31,7 +31,7 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         items=make_enum_prop_items(xj.TextureAddressingMode))
     material1: IntProperty(name="Unknown 1", default=0)
     material2: IntProperty(name="Unknown 2", default=0)
-    lighting: BoolProperty(name="Affected by lighting", default=False)
+    lighting: BoolProperty(name="Affected by lighting", default=True)
     camera_space_normals: BoolProperty(name="Camera space normals", default=False)
     normal_type: EnumProperty(
         name="Normal type",
