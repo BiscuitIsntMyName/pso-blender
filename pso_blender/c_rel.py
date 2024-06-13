@@ -59,7 +59,7 @@ class Mesh(Serializable):
     faces: Ptr32 = NULLPTR # Face
 
 
-COLLISION_FLAG_NAMES = {
+COLLISION_FLAG_TYPES = {
     0x1: "Camera",
     0x2: "Unknown",
     0x4: "Water terrain",
@@ -77,6 +77,15 @@ COLLISION_FLAG_NAMES = {
     0x4000: "Unknown",
     0x8000: "Monster vision", # Prevents monsters from seeing player
 }
+
+
+@dataclass
+class TerrainFlag():
+    Normal = 0x1
+    ShallowWater = 0x2
+    DeepWater = 0x4
+    Footprints = 0x8
+    Grass = 0x10
 
 
 @dataclass
@@ -104,6 +113,12 @@ def write(path: str, objects: list[bpy.types.Object]):
         geom_center = util.from_blender_axes(util.geometry_world_center(obj) * util.get_pso_world_scale())
 
         collision_flags = obj.rel_settings.collision_flags_value1 | (obj.rel_settings.collision_flags_value2 << 16)
+        terrain_vertex_groups = {
+            TerrainFlag.Normal: obj.vertex_groups.get("terrain_normal"),
+            TerrainFlag.ShallowWater: obj.vertex_groups.get("terrain_shallow"),
+            TerrainFlag.DeepWater: obj.vertex_groups.get("terrain_deep"),
+            TerrainFlag.Footprints: obj.vertex_groups.get("terrain_footprints"),
+            TerrainFlag.Grass: obj.vertex_groups.get("terrain_grass")}
 
         node = CrelNode(
             flags=collision_flags,
@@ -134,17 +149,32 @@ def write(path: str, objects: list[bpy.types.Object]):
             indices = face.vertices
             # Find farthest distance between vertices
             farthest_sq = float("-inf")
-            for i in range(len(face.vertices)):
-                for j in range(len(face.vertices)):
+            for i in range(len(indices)):
+                for j in range(len(indices)):
                     if i == j:
                         continue
                     a = vertex_array.vertices[i].as_vector().xz * util.get_pso_world_scale()
                     b = vertex_array.vertices[j].as_vector().xz * util.get_pso_world_scale()
                     farthest_sq = max(farthest_sq, util.distance_squared(a, b))
+            # Check if face in terrain vertex group
+            terrain_flags = TerrainFlag.Normal
+            for flag in terrain_vertex_groups:
+                vgroup = terrain_vertex_groups[flag]
+                if not vgroup:
+                    continue
+                for vert_i in indices:
+                    try:
+                        # Will throw if vertex not in group
+                        vgroup.weight(vert_i)
+                    except RuntimeError:
+                        break
+                else:
+                    terrain_flags |= flag
+                    print("Adding terrain flag " + str(flag))
             center = util.from_blender_axes(obj.matrix_world @ face.center) * util.get_pso_world_scale()
             radius = math.sqrt(farthest_sq)
             ptr = rel.write(Face(
-                flags=collision_flags,
+                flags=terrain_flags,
                 x=center[0],
                 y=center[1],
                 z=center[2],

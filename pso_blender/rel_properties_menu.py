@@ -18,20 +18,20 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     always_rendered: BoolProperty(name="Always rendered", description="Object will not be affected by view distance and will always be rendered.", default=False)
 
 
-def make_collision_flag_props():
+def make_bitfield_props(setting_name, name_map):
     prop_keys = []
 
     def make_flag_getter(flag):
-        return lambda settings: (settings.collision_flags_value1 & flag) != 0
+        return lambda settings: (getattr(settings, setting_name) & flag) != 0
 
     def make_flag_setter(flag):
         return lambda settings, value: (
-                setattr(settings, "collision_flags_value1", settings.collision_flags_value1 | flag)
+                setattr(settings, setting_name, getattr(settings, setting_name) | flag)
                 if value else
-                setattr(settings, "collision_flags_value1", settings.collision_flags_value1 & ~flag))
+                setattr(settings, setting_name, getattr(settings, setting_name) & ~flag))
 
-    for flag, name in c_rel.COLLISION_FLAG_NAMES.items():
-        key = "collision_flag_" + hex(flag)
+    for flag, name in name_map.items():
+        key = setting_name + "_" + hex(flag)
         label = "{} ({})".format(name, hex(flag))
         prop = BoolProperty(
             name=label,
@@ -44,7 +44,7 @@ def make_collision_flag_props():
     return prop_keys
 
 
-COLLISION_FLAG_PROP_KEYS = make_collision_flag_props()
+COLLISION_FLAG_PROP_KEYS = make_bitfield_props("collision_flags_value1", c_rel.COLLISION_FLAG_TYPES)
 
 
 class MeshNrelSettingsPanel(Panel):

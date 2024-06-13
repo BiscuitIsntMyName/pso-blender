@@ -76,9 +76,9 @@ def register():
     # Add buttons to export and import menus
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-    # Add settings panel to object menu
+    # Add settings to objects
     bpy.types.Object.rel_settings = PointerProperty(type=MeshRelSettings)
-    # Add settings panel to material menu
+    # Add settings to materials
     bpy.types.Material.xj_settings = PointerProperty(type=XjMaterialSettings)
     # Add hooks
     load_post.append(convert_legacy_properties)
