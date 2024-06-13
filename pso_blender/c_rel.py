@@ -170,7 +170,6 @@ def write(path: str, objects: list[bpy.types.Object]):
                         break
                 else:
                     terrain_flags |= flag
-                    print("Adding terrain flag " + str(flag))
             center = util.from_blender_axes(obj.matrix_world @ face.center) * util.get_pso_world_scale()
             radius = math.sqrt(farthest_sq)
             ptr = rel.write(Face(

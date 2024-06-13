@@ -99,11 +99,12 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
     # Chunk -1 will always be visible
     always_rendered_chunk = Chunk(
         id=-1,
-        flags=chunk_flags,
+        flags=0xffffffff,
         static_mesh_tree_count=0,
         x=0.0,
         y=0.0,
-        z=0.0)
+        z=0.0,
+        radius=999999.0)
     chunk_to_children[always_rendered_chunk] = []
     # If object is set to be always rendered then put it in chunk -1
     for obj in objects:
