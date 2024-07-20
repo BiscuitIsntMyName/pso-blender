@@ -80,7 +80,7 @@ COLLISION_FLAG_TYPES = {
 
 
 @dataclass
-class TerrainFlag():
+class TerrainFlag:
     Normal = 0x1
     ShallowWater = 0x2
     DeepWater = 0x4
@@ -173,7 +173,7 @@ def write(path: str, objects: list[bpy.types.Object]):
             center = util.from_blender_axes(obj.matrix_world @ face.center) * util.get_pso_world_scale()
             radius = math.sqrt(farthest_sq)
             ptr = rel.write(Face(
-                flags=terrain_flags,
+                flags=terrain_flags | collision_flags,
                 x=center[0],
                 y=center[1],
                 z=center[2],
