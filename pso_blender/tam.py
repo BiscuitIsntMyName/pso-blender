@@ -32,7 +32,7 @@ class Keyframe(Serializable):
 class TamEntry(Serializable):
     frame_type: U16 = 0
     body_size: U16 = 0
-    animation_id: U16 = 0
+    animation_id: I16 = 0
     frame_count: U16 = 0
     frames: list[Keyframe] = field(default_factory=list)
 
@@ -55,7 +55,7 @@ def write(tam_path: str, texture_man: TextureManager, objs: list[bpy.types.Objec
         entry = TamEntry(
             frame_type=FrameType.SLIDESHOW,
             body_size=Keyframe.type_size() * len(frames) + 4,
-            animation_id=anim_tex.id & 0xffff,
+            animation_id=anim_tex.id & 0x7fff,
             frame_count=len(frames),
             frames=frames)
         

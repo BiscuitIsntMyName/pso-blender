@@ -25,7 +25,10 @@ def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
     for item in os.listdir(dirname):
         if os.path.isfile(os.path.join(dirname, item)):
             frame_names.append(item)
-    return [bpy.data.images.load(os.path.join(dirname, name)) for name in sorted(frame_names)]
+    return [
+        bpy.data.images.load(os.path.join(dirname, name))
+        # Sort filenames in numeric order
+        for name in sorted(frame_names, key=lambda key: int(os.path.basename(os.path.splitext(key)[0])))]
 
 
 class XvrFormat:

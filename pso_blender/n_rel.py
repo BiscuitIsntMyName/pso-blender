@@ -30,7 +30,7 @@ class MeshTreeFlag:
 
 @dataclass
 class TextureAnimationInfo(Serializable):
-    animation_id: U16 = 0 # Needs to match .tam entry
+    animation_id: I16 = 0 # Needs to match .tam entry
     unk1: U16 = 0
     current_texture_index: U16 = 0 # Set at runtime
     frame_counter: U16 = 0 # ...
@@ -195,7 +195,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
             if anim_tex:
                 # Just use the texture id as the animation id
                 static_mesh_tree.texture_animation_info = rel.write(
-                    TextureAnimationInfo(animation_id=anim_tex.id & 0xffff))
+                    TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff))
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
             mesh_node = MeshTreeNode(
