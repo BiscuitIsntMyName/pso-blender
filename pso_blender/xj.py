@@ -22,6 +22,11 @@ NULLPTR = Numeric.NULLPTR
 def vertex_has_color(fmt: int) -> bool:
     return fmt == 4 or fmt == 5 or fmt == 6 or fmt == 7
 
+def vertex_has_normals(fmt: int) -> bool:
+    return fmt == 2 or fmt == 3 or fmt == 6 or fmt == 7
+
+def vertex_has_uvs(fmt: int) -> bool:
+    return fmt == 1 or fmt == 3 or fmt == 5 or fmt == 7
 
 @dataclass
 class VertexFormat1(Serializable):
@@ -554,10 +559,11 @@ def make_renderstate_args(
 
 
 def xj_to_blender_mesh(name: str, node: MeshTreeNode) -> bpy.types.Collection:
-    collection = bpy.data.collections.new(name)
+    collection = bpy.data.collections.new("mesh_group_" + name)
 
     world_scale = 1
 
+    counter = 0
     # Find all meshes in model tree
     search_stack = [node]
     while len(search_stack) > 0:
@@ -573,48 +579,114 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode) -> bpy.types.Collection:
         if node.mesh == NULLPTR:
             continue
 
-        vertices = []
-        faces = []
+        # Group index buffers by their vertex buffer
+        alpha_index_buffers = {}
+        for index_buffer in node.mesh.alpha_index_buffers:
+            if index_buffer.vertex_buffer_index in alpha_index_buffers:
+                alpha_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
+            else:
+                alpha_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
 
-        # Get vertices
+        opaque_index_buffers = {}
+        for index_buffer in node.mesh.index_buffers:
+            if index_buffer.vertex_buffer_index in opaque_index_buffers:
+                opaque_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
+            else:
+                opaque_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
+        
+        combined_index_buffers = list(alpha_index_buffers.items()) + list(opaque_index_buffers.items())
+
+        # Get the attributes of each vertex buffer
+        vertex_sets = []
+        normal_sets = []
+        uv_sets = []
+        color_sets = []
+
         for vertex_buffer in node.mesh.vertex_buffers:
+            vertices = []
+            colors = []
+            normals = []
+            uvs = []
+            has_color = vertex_has_color(vertex_buffer.vertex_format)
+            has_normals = vertex_has_normals(vertex_buffer.vertex_format)
+            has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
             for vertex in vertex_buffer.vertex_buffer:
                 vertices.append((vertex.x, vertex.z, vertex.y))
+                if has_color:
+                    colors.append((vertex.r, vertex.g, vertex.b))
+                if has_normals:
+                    normals.append((vertex.nx, vertex.ny, vertex.nz))
+                if has_uvs:
+                    uvs.append((vertex.u, vertex.v))
+            vertex_sets.append(vertices)
+            color_sets.append(colors)
+            normal_sets.append(normals)
+            uv_sets.append(uvs)
 
-        # Get indices
-        for index_buffer in node.mesh.index_buffers + node.mesh.alpha_index_buffers:
-            indices = index_buffer.index_buffer
-            swap = False
-            for i in range(len(indices) - 2):
-                # Parsing a triangle strip
-                i0 = indices[i + 0]
-                i1 = indices[i + 1]
-                i2 = indices[i + 2]
-                if swap:
-                    i1, i2 = i2, i1
-                swap = not swap
-                faces.append((i0, i1, i2))
+        # Create one mesh for each vertex buffer (opaque and alpha separated)
+        # Index buffers that use the same vertex buffer can be combined into one mesh
+        for vertex_buffer_index, index_buffers in combined_index_buffers:
+            vertices = vertex_sets[vertex_buffer_index]
+            colors = color_sets[vertex_buffer_index]
+            normals = normal_sets[vertex_buffer_index]
+            uvs = uv_sets[vertex_buffer_index]
 
-        # Put geometry into blender object
-        blender_mesh = bpy.data.meshes.new("mesh_" + name)
-        blender_mesh.from_pydata(vertices, [], faces)
-        blender_mesh.update()
-        util.scale_mesh(blender_mesh, node.scale_x, node.scale_z, node.scale_y)
-        obj = bpy.data.objects.new(name, blender_mesh)
-        obj.location = (node.x / world_scale, node.z / world_scale, node.y / world_scale)
-        obj.rotation_euler = (node.rot_x / 0xffff, node.rot_z / 0xffff, node.rot_y / 0xffff)
+            faces = []
 
-        colors = obj.data.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
-        vert_idx = 0
-        for vertex_buffer in node.mesh.vertex_buffers:
-            for vertex in vertex_buffer.vertex_buffer:
-                if vertex_has_color(vertex_buffer.vertex_format):
-                    colors.data[vert_idx].color[0] = vertex.r / 0xff
-                    colors.data[vert_idx].color[1] = vertex.g / 0xff
-                    colors.data[vert_idx].color[2] = vertex.b / 0xff
-                vert_idx += 1
+            for index_buffer in index_buffers:
+                indices = index_buffer.index_buffer
+                for i in range(len(indices) - 2):
+                    # Parsing a triangle strip
+                    i0 = indices[i + 0]
+                    i1 = indices[i + 1]
+                    i2 = indices[i + 2]
+                    # Ignore degenerate triangles
+                    if i0 == i1 or i1 == i2 or i2 == i0:
+                        continue
+                    if i % 2 == 1:
+                        i1, i2 = i2, i1
+                    faces.append((i0, i1, i2))
+            
+            # Put geometry into blender object
+            mesh_name = "mesh_" + name + "_" + str(counter)
+            blender_mesh = bpy.data.meshes.new(mesh_name)
+            blender_mesh.from_pydata(vertices, [], faces)
+            blender_mesh.update()
 
-        collection.objects.link(obj)
+            # Add UVs if any
+            if len(uvs) > 0:
+                uv_attribute = blender_mesh.uv_layers.new()
+                # Convert from per-vertex to per-loop
+                for loop in blender_mesh.loops:
+                    uv_attribute.uv[loop.index].vector[0] = uvs[loop.vertex_index][0]
+                    uv_attribute.uv[loop.index].vector[1] = uvs[loop.vertex_index][1]
+
+            # Add normals if any
+            if len(normals) > 0:
+                # This function automatically converts from per-vertex to per-loop
+                blender_mesh.normals_split_custom_set_from_vertices(normals)
+
+            # Add vertex colors if any
+            if len(colors) > 0:
+                color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
+                for i in range(len(colors)):
+                    color_attribute.data[i].color[0] = colors[i][0] / 0xff
+                    color_attribute.data[i].color[1] = colors[i][1] / 0xff
+                    color_attribute.data[i].color[2] = colors[i][2] / 0xff
+
+            # Apply transforms
+            util.scale_mesh(blender_mesh, node.scale_x, node.scale_z, node.scale_y)
+            obj = bpy.data.objects.new(mesh_name, blender_mesh)
+            obj.location = (node.x / world_scale, node.z / world_scale, node.y / world_scale)
+            obj.rotation_euler = (node.rot_x / 0xffff, node.rot_z / 0xffff, node.rot_y / 0xffff)
+
+            # Create vertex groups for materials
+            for i in range(len(index_buffers)):
+                vertex_group = obj.vertex_groups.new(name="index_buffer_" + str(i))
+                vertex_group.add(index_buffers[i].index_buffer, 1.0, "ADD")
+
+            collection.objects.link(obj)
+            counter += 1
     return collection
 
 

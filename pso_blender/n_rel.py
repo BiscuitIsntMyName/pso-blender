@@ -303,7 +303,7 @@ def to_blender(name: str, nrel: NrelFmt2) -> bpy.types.Collection:
 
         tree_counter = 0
         for tree in chunk.static_mesh_trees:
-            models = xj.xj_to_blender_mesh("mesh_{}_{}".format(chunk.id, tree_counter), tree.root_node)
+            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node)
             for obj in models.objects:
                 util.scale_mesh(obj.data, 1 / world_scale)
 
