@@ -283,6 +283,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         if len(xvr.data) < 1:
             # Dummy material
             mat = bpy.data.materials.new(name + "_dummy_" + str(i))
+            mat.diffuse_color = (1.0, 0.0, 1.0, 1.0)
         else:
             # Create material that uses texture and vcol as input
             img = bpy.data.images.new(
@@ -307,6 +308,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
             mix_node = mat.node_tree.nodes.new(type="ShaderNodeMix")
             mix_node.data_type = "RGBA"
             mix_node.blend_type = "MULTIPLY"
+            mix_node.inputs[0].default_value = 1.0
 
             tex_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
             tex_node.image = img
@@ -331,6 +333,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
 
+        chunk.x *= -1
         chunk.x /= world_scale
         chunk.y /= world_scale
         chunk.z /= world_scale
@@ -351,11 +354,13 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, materials)
             for obj in models.objects:
                 util.scale_mesh(obj.data, 1 / world_scale)
-
+                obj.rotation_euler = (chunk.rot_x / 0x7fff * -3.14, chunk.rot_z / 0x7fff * 3.14, chunk.rot_y / 0x7fff * 3.14)
+                util.apply_transfrom(obj, use_rotation=True)
                 obj.location = (
                     chunk.x + obj.location.x / world_scale,
                     chunk.z + obj.location.y / world_scale,
                     chunk.y + obj.location.z / world_scale)
+
                 obj.rel_settings.is_nrel = True
 
             chunk_coll.children.link(models)

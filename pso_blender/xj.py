@@ -611,7 +611,7 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
             has_normals = vertex_has_normals(vertex_buffer.vertex_format)
             has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
             for vertex in vertex_buffer.vertex_buffer:
-                vertices.append((vertex.x, vertex.z, vertex.y))
+                vertices.append((-vertex.x, vertex.z, vertex.y))
                 if has_color:
                     colors.append((vertex.r, vertex.g, vertex.b))
                 if has_normals:
@@ -677,8 +677,10 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
             # Apply transforms
             util.scale_mesh(blender_mesh, node.scale_x, node.scale_z, node.scale_y)
             obj = bpy.data.objects.new(mesh_name, blender_mesh)
-            obj.location = (node.x / world_scale, node.z / world_scale, node.y / world_scale)
-            obj.rotation_euler = (node.rot_x / 0xffff, node.rot_z / 0xffff, node.rot_y / 0xffff)
+            obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
+            util.apply_transfrom(obj, use_rotation=True)
+            obj.location = (-node.x / world_scale, node.z / world_scale, node.y / world_scale)
+            util.apply_transfrom(obj, use_location=True)
 
             tex_to_mat_slot = dict()
             # Create vertex groups for materials

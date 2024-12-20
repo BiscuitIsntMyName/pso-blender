@@ -170,8 +170,7 @@ def dxt1_decompress(data: bytearray, img_width: int, img_height: int) -> list[fl
             block_x = block_px_i % DXT_BLOCK_DIM
             block_y = block_px_i // DXT_BLOCK_DIM
             # Calculate pixel index (basically y*w+x)
-            # Y is inverted
-            px_i = (img_height - (px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
+            px_i = ((px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
 
             # Get color for this pixel
             color_idx = color_indices & 0b11

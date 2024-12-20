@@ -107,3 +107,36 @@ def scale_mesh(mesh: bpy.types.Mesh, x: float, y: float=None, z: float=None):
 
 def get_pso_world_scale() -> float:
     return 33.0
+
+
+def apply_transfrom(ob, use_location=False, use_rotation=False, use_scale=False):
+    mb = ob.matrix_basis
+    ident = Matrix()
+    loc, rot, scale = mb.decompose()
+
+    # rotation
+    T = Matrix.Translation(loc)
+    #R = rot.to_matrix().to_4x4()
+    R = mb.to_3x3().normalized().to_4x4()
+    S = Matrix.Diagonal(scale).to_4x4()
+
+    transform = [ident, ident, ident]
+    basis = [T, R, S]
+
+    def swap(i):
+        transform[i], basis[i] = basis[i], transform[i]
+
+    if use_location:
+        swap(0)
+    if use_rotation:
+        swap(1)
+    if use_scale:
+        swap(2)
+        
+    M = transform[0] @ transform[1] @ transform[2]
+    if hasattr(ob.data, "transform"):
+        ob.data.transform(M)
+    for c in ob.children:
+        c.matrix_local = M @ c.matrix_local
+        
+    ob.matrix_basis = basis[0] @ basis[1] @ basis[2]
