@@ -558,7 +558,7 @@ def make_renderstate_args(
     return rs_args
 
 
-def xj_to_blender_mesh(name: str, node: MeshTreeNode) -> bpy.types.Collection:
+def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.Material]) -> bpy.types.Collection:
     collection = bpy.data.collections.new("mesh_group_" + name)
 
     world_scale = 1
@@ -680,10 +680,25 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode) -> bpy.types.Collection:
             obj.location = (node.x / world_scale, node.z / world_scale, node.y / world_scale)
             obj.rotation_euler = (node.rot_x / 0xffff, node.rot_z / 0xffff, node.rot_y / 0xffff)
 
+            tex_to_mat_slot = dict()
             # Create vertex groups for materials
             for i in range(len(index_buffers)):
+                index_buffer = index_buffers[i]
+                indices = index_buffer.index_buffer
                 vertex_group = obj.vertex_groups.new(name="index_buffer_" + str(i))
-                vertex_group.add(index_buffers[i].index_buffer, 1.0, "ADD")
+                vertex_group.add(indices, 1.0, "ADD")
+                tex_idx = next((r.arg1 for r in index_buffer.renderstate_args if r.state_type == RenderStateType.TEXTURE_ID), None)
+                if tex_idx is None:
+                    continue
+                if tex_idx in tex_to_mat_slot:
+                    slot_idx = tex_to_mat_slot[tex_idx]
+                else:
+                    obj.data.materials.append(materials[tex_idx])
+                    slot_idx = len(obj.data.materials) - 1
+                    tex_to_mat_slot[tex_idx] = slot_idx
+                for poly in obj.data.polygons:
+                    if all(i in indices for i in poly.vertices):
+                        poly.material_index = slot_idx
 
             collection.objects.link(obj)
             counter += 1

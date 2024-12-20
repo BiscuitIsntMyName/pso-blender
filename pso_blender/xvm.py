@@ -1,10 +1,11 @@
-import os, pathlib, marshal, json, hashlib
+import os, pathlib, marshal, json, hashlib, warnings
 from dataclasses import dataclass, field
 import bpy
 import bpy.types
-from .serialization import Serializable, Numeric, ResizableBuffer
+from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
 from . import dxt
 from .util import magic_field, Texture, get_object_diffuse_textures
+from .iff import IffHeader
 
 
 U8 = Numeric.U8
@@ -60,7 +61,7 @@ class XvrFlags:
 
 @dataclass
 class Xvr(Serializable):
-    magic: list[U8] = magic_field("XVRT")
+    magic: FixedArray(U8, 4) = magic_field("XVRT")
     body_size: U32 = 0
     flags: U32 = 0
     format: U32 = 0
@@ -79,10 +80,11 @@ class Xvr(Serializable):
     unk9: U32 = 0
     data: list[U8] = field(default_factory=list)
 
+XVM_ITEM_ALIGNMENT = 64
 
 @dataclass
 class Xvm(Serializable):
-    magic: list[U8] = magic_field("XVMH")
+    magic: FixedArray(U8, 4) = magic_field("XVMH")
     body_size: U32 = 0
     xvr_count: U32 = 0
     unk1: U32 = 0
@@ -217,12 +219,11 @@ def save_cache_index(path: str, index: dict[str, str]):
 
 
 def get_cached_xvr(path: str) -> Xvr:
-    magic_size = 4
     print("XVM Notice: Loading texture from cache '{}'".format(path))
     with open(path, "rb") as f:
         file_contents = f.read()
-        (xvr, offset) = Xvr.deserialize_from(file_contents[magic_size:])
-        xvr.data = file_contents[offset + magic_size:]
+        (xvr, offset) = Xvr.deserialize_from(file_contents)
+        xvr.data = file_contents[offset:]
     return xvr
 
 
@@ -254,7 +255,7 @@ def make_xvr(tex: Texture) -> Xvr:
             # Remove temporary copies because Blender automatically saves them in the scene
             bpy.data.images.remove(level)
     return Xvr(
-        body_size=len(data) + Xvr.type_size() - 4,
+        body_size=len(data) + Xvr.type_size() - IffHeader.type_size(),
         id=tex.id,
         flags=flags,
         format=xvr_format,
@@ -293,7 +294,7 @@ def write(path: str, textures: list[Texture]):
     buf = ResizableBuffer(0)
     # I'll just explicitly write the lists because it's easier
     xvm = Xvm(
-        body_size=Xvm.type_size() - 4,
+        body_size=Xvm.type_size() - IffHeader.type_size(),
         xvr_count=len(xvrs))
     xvm.serialize_into(buf)
     for xvr in xvrs:
@@ -304,3 +305,26 @@ def write(path: str, textures: list[Texture]):
         buf.seek_to_end()
     with open(path, "wb") as f:
         f.write(buf.buffer)
+
+
+def read(path: str) -> Xvm:
+    try:
+        with open(path, "rb") as f:
+            file_contents = bytearray(f.read())
+    except FileNotFoundError:
+        warnings.warn("XVM not found: \"{}\"".format(path))
+        return Xvm()
+
+    (xvm, xvr_offset) = Xvm.deserialize_from(file_contents)
+    for _ in range(xvm.xvr_count):
+        (xvr, data_offset) = Xvr.deserialize_from(file_contents, xvr_offset)
+        xvr.data = file_contents[data_offset : data_offset + xvr.data_size]
+        if xvr.format == XvrFormat.DXT1:
+            xvr.data = dxt.dxt1_decompress(xvr.data, xvr.width, xvr.height)
+        else:
+            warnings.warn("Unsupported XVR format: {}".format(xvr.format))
+            xvr.data = []
+        xvm.xvrs.append(xvr)
+        xvr_offset += xvr.body_size + IffHeader.type_size()
+
+    return xvm

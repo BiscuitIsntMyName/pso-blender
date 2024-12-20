@@ -116,13 +116,15 @@ def dxt1_compress_block(
 
 
 DXT_BLOCK_DIM = 4
+DXT1_BLOCK_SZ = 8
+
+
 def compress_image(pixels: list[float], img_width: int, img_height: int, src_channels: int, with_alpha: bool) -> bytearray:
     if src_channels < 3 or (with_alpha and src_channels < 4):
         raise Exception("XVR error: Image must have either 3 or 4 channels")
     if img_width % DXT_BLOCK_DIM != 0 or img_height % DXT_BLOCK_DIM != 0:
         raise Exception("XVR error: Image dimensions must be multiples of {}".format(DXT_BLOCK_DIM))
-    dst_block_size = 2 + 2 + 4
-    dst_buf = bytearray(img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM) * dst_block_size)
+    dst_buf = bytearray(img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM) * DXT1_BLOCK_SZ)
     # Create work
     block_coords = []
     for y in range(0, img_height, DXT_BLOCK_DIM):
@@ -134,7 +136,61 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
         results = pool.map(worker_fn, block_coords)
     # Write results into buffer
     for (block_idx, result) in enumerate(results):
-        dst_offset = block_idx * dst_block_size
+        dst_offset = block_idx * DXT1_BLOCK_SZ
         (color0, color1, color_indices) = result
         struct.pack_into("<HHL", dst_buf, dst_offset, color0, color1, color_indices)
     return dst_buf
+
+
+def dxt1_decompress(data: bytearray, img_width: int, img_height: int) -> list[float]:
+    dst_chans = 4 # Blender always wants 4 channels
+    dst_buf = img_width * img_height * dst_chans * [0.0]
+    num_blocks = img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM)
+    palette_ratios_no_alpha = [1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0]
+    palette_ratios_with_alpha = [1.0, 0.0, 0.5]
+
+    # Iterate over compressed blocks
+    for block_idx in range(num_blocks):
+        # Read block data
+        (color0, color1, color_indices) = struct.unpack_from("<HHL", data, block_idx * DXT1_BLOCK_SZ)
+
+        # Color order indicates if color3 is 1bit alpha
+        palette_with_alpha = color0 <= color1
+        palette_ratios = palette_ratios_with_alpha if palette_with_alpha else palette_ratios_no_alpha
+
+        color0 = decompose_rgb565(color0)
+        color1 = decompose_rgb565(color1)
+
+        # Pixel coords of block corner
+        px_x0 = block_idx % (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+        px_y0 = block_idx // (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+
+        # Iterate over block pixels
+        for block_px_i in range(DXT_BLOCK_DIM * DXT_BLOCK_DIM):
+            block_x = block_px_i % DXT_BLOCK_DIM
+            block_y = block_px_i // DXT_BLOCK_DIM
+            # Calculate pixel index (basically y*w+x)
+            # Y is inverted
+            px_i = (img_height - (px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
+
+            # Get color for this pixel
+            color_idx = color_indices & 0b11
+            color_indices = color_indices >> 2
+
+            if palette_with_alpha and color_idx == 3:
+                # Color3 is alpha
+                dst_buf[px_i + 3] = 0.0
+            else:
+                # Get color from palette
+                ratio = palette_ratios[color_idx]
+                for chan in range(len(color0)):
+                    # Add together portion of color0 and inverse portion of color1
+                    part0 = ratio * (color0[chan] / 0xff)
+                    part1 = (1.0 - ratio) * (color1[chan] / 0xff)
+                    dst_buf[px_i + chan] = part0 + part1
+                # No alpha
+                dst_buf[px_i + 3] = 1.0
+
+    return dst_buf
+
+
