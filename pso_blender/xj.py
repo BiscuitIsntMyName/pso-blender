@@ -390,13 +390,17 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
 class MaterialStrips:
     def __init__(self, material_index: int, material: bpy.types.Material, strips: list[list[int]]):
         self.material_index = material_index
-        self.renderstate_args = make_renderstate_args(
-            blend_modes=(material.xj_settings.src_blend, material.xj_settings.dst_blend),
-            texture_addressing=(material.xj_settings.tex_addr_u, material.xj_settings.tex_addr_v),
-            lighting=material.xj_settings.lighting,
-            material=(material.xj_settings.material1, material.xj_settings.material2),
-            camera_space_normals=material.xj_settings.camera_space_normals,
-            diffuse_color_source=material.xj_settings.diffuse_color_source)
+        if material:
+            self.renderstate_args = make_renderstate_args(
+                blend_modes=(material.xj_settings.src_blend, material.xj_settings.dst_blend),
+                texture_addressing=(material.xj_settings.tex_addr_u, material.xj_settings.tex_addr_v),
+                lighting=material.xj_settings.lighting,
+                material=(material.xj_settings.material1, material.xj_settings.material2),
+                camera_space_normals=material.xj_settings.camera_space_normals,
+                diffuse_color_source=material.xj_settings.diffuse_color_source)
+        else:
+            # Empty slot
+            self.renderstate_args = make_renderstate_args()
         self.strips = strips
 
 
@@ -404,14 +408,16 @@ def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bp
     material_strips = []
     if texture_man.has_textures():
         material_faces = []
+        # Get all faces grouped by their material, then stripify them
         for (mat_idx, mat_slot) in enumerate(obj.material_slots):
             material_faces.append([])
             material_strips.append(MaterialStrips(mat_idx, mat_slot.material, []))
         for face in blender_mesh.loop_triangles:
             material_faces[face.material_index].append(tuple(face.loops))
         for mat_idx in range(len(obj.material_slots)):
-            strips = tristrip.stripify(material_faces[mat_idx], stitchstrips=True)
-            material_strips[mat_idx].strips = strips
+            if len(material_faces[mat_idx]) > 0:
+                strips = tristrip.stripify(material_faces[mat_idx], stitchstrips=True)
+                material_strips[mat_idx].strips = strips
     else:
         faces = []
         for face in blender_mesh.loop_triangles:
@@ -478,6 +484,9 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
 
     normal_type = None
     for mat_slot in obj.material_slots:
+        if not mat_slot.material:
+            # Empty slot
+            continue
         # Lighting requires normals
         if mat_slot.material.xj_settings.lighting or mat_slot.material.xj_settings.camera_space_normals:
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
