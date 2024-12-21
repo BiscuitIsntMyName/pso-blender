@@ -643,6 +643,8 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
                     # Ignore degenerate triangles
                     if i0 == i1 or i1 == i2 or i2 == i0:
                         continue
+                    if vertices[i0] == vertices[i1] or vertices[i1] == vertices[i2] or vertices[i2] == vertices[i0]:
+                        continue
                     if i % 2 == 1:
                         i1, i2 = i2, i1
                     faces.append((i0, i1, i2))
