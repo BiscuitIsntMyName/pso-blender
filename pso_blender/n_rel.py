@@ -277,52 +277,7 @@ def read(path: str) -> NrelFmt2:
 
 
 def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collection:
-    materials = []
-    for i in range(len(nrel_xvm.xvrs)):
-        xvr = nrel_xvm.xvrs[i]
-        if len(xvr.data) < 1:
-            # Dummy material
-            mat = bpy.data.materials.new(name + "_dummy_" + str(i))
-            mat.diffuse_color = (1.0, 0.0, 1.0, 1.0)
-        else:
-            # Create material that uses texture and vcol as input
-            img = bpy.data.images.new(
-                name + "_xvr_" + str(i),
-                width=xvr.width, height=xvr.height)
-            img.pixels = xvr.data
-
-            mat = bpy.data.materials.new(name + "_mat_" + str(i))
-            mat.use_nodes = True
-            if mat.node_tree:
-                mat.node_tree.links.clear()
-                mat.node_tree.nodes.clear()
-
-            output_node = mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial")
-            bsdf_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfDiffuse")
-            transparency_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfTransparent")
-            shader_mix_node = mat.node_tree.nodes.new(type="ShaderNodeMixShader")
-
-            vcol_node = mat.node_tree.nodes.new(type="ShaderNodeVertexColor")
-            vcol_node.layer_name = "vertex_color"
-
-            mix_node = mat.node_tree.nodes.new(type="ShaderNodeMix")
-            mix_node.data_type = "RGBA"
-            mix_node.blend_type = "MULTIPLY"
-            mix_node.inputs[0].default_value = 1.0
-
-            tex_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
-            tex_node.image = img
-            tex_node.extension = "MIRROR"
-
-            mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
-            mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
-            mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
-            mat.node_tree.links.new(tex_node.outputs[1], shader_mix_node.inputs[0])
-            mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
-            mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
-            mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])
-
-        materials.append(mat)
+    materials = nrel_xvm.to_blender_materials(name)
 
     collection = bpy.data.collections.new(name)
     world_scale = util.get_pso_world_scale()

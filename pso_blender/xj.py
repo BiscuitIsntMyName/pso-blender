@@ -1,4 +1,4 @@
-import bpy, os
+import bpy, os, warnings
 from dataclasses import dataclass, field
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
@@ -677,9 +677,9 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
                 # This function automatically converts from per-vertex to per-loop
                 blender_mesh.normals_split_custom_set_from_vertices(normals)
 
-            # Add vertex colors if any
+            # Add vertex colors
+            color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
             if len(colors) > 0:
-                color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
                 for i in range(len(colors)):
                     color_attribute.data[i].color[0] = colors[i][0] / 0xff
                     color_attribute.data[i].color[1] = colors[i][1] / 0xff
@@ -703,15 +703,19 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
                 tex_idx = next((r.arg1 for r in index_buffer.renderstate_args if r.state_type == RenderStateType.TEXTURE_ID), None)
                 if tex_idx is None:
                     continue
+                slot_idx = None
                 if tex_idx in tex_to_mat_slot:
                     slot_idx = tex_to_mat_slot[tex_idx]
-                else:
+                elif tex_idx < len(materials):
                     obj.data.materials.append(materials[tex_idx])
                     slot_idx = len(obj.data.materials) - 1
                     tex_to_mat_slot[tex_idx] = slot_idx
-                for poly in obj.data.polygons:
-                    if all(i in indices for i in poly.vertices):
-                        poly.material_index = slot_idx
+                if slot_idx is None:
+                    warnings.warn("Failed to apply material due to texture ID mismatch")
+                else:
+                    for poly in obj.data.polygons:
+                        if all(i in indices for i in poly.vertices):
+                            poly.material_index = slot_idx
 
             collection.objects.link(obj)
             counter += 1
