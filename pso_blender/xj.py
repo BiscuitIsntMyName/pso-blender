@@ -400,7 +400,7 @@ class MaterialStrips:
                 diffuse_color_source=material.xj_settings.diffuse_color_source)
         else:
             # Empty slot
-            self.renderstate_args = make_renderstate_args()
+            self.renderstate_args = []
         self.strips = strips
 
 
@@ -422,7 +422,8 @@ def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bp
         faces = []
         for face in blender_mesh.loop_triangles:
             faces.append(tuple(face.loops))
-        material_strips.append(tristrip.stripify(faces, stitchstrips=True))
+        strips = tristrip.stripify(faces, stitchstrips=True)
+        material_strips.append(MaterialStrips(-1, None, strips))
     return material_strips
 
 

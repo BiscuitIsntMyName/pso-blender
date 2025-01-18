@@ -114,6 +114,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
         # No markers, put all meshes in the same chunk at 0,0,0
         warn("N.REL Warning: No chunk markers found in scene. Placing all meshes in default chunk.")
         chunk_to_children[always_rendered_chunk] = objects
+        always_rendered_chunk.static_mesh_tree_count = len(objects)
     else:
         # Create a chunk for each marker
         for marker in chunk_markers:
