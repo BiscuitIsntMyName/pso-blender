@@ -35,9 +35,8 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
     camera_space_normals: BoolProperty(name="Camera space normals", default=False)
     normal_type: EnumProperty(
         name="Normal type",
-        default={str(xj.NormalType.Vertex)},
-        items=make_enum_prop_items(xj.NormalType),
-        options={"ENUM_FLAG"})
+        default=str(xj.NormalType.Vertex),
+        items=make_enum_prop_items(xj.NormalType))
     diffuse_color_source: EnumProperty(
         name="Diffuse color source",
         default=str(xj.MaterialColorSource.D3DMCS_COLOR1),

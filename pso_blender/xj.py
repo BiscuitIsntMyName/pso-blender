@@ -490,8 +490,10 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
             continue
         # Lighting requires normals
         if mat_slot.material.xj_settings.lighting or mat_slot.material.xj_settings.camera_space_normals:
+            if not mat_slot.material.xj_settings.normal_type:
+                mat_slot.material.xj_settings.normal_type = str(NormalType.Vertex)
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
-            normal_type = int(list(mat_slot.material.xj_settings.normal_type)[0])
+            normal_type = int(mat_slot.material.xj_settings.normal_type)
             break
     
     if len(blender_mesh.color_attributes) > 0:
