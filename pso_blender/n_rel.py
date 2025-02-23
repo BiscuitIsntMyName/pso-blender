@@ -136,6 +136,8 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             nearest_chunk = None
             nearest_dist_sq = float("inf")
             for chunk in chunk_to_children:
+                if chunk.id == -1:
+                    continue
                 dist_sq = util.distance_squared(obj_center.xz, Vector((chunk.x, 0.0, chunk.z)).xz)
                 if dist_sq < nearest_dist_sq:
                     nearest_dist_sq = dist_sq
