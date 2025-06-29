@@ -804,7 +804,7 @@ def read(path: str) -> list[bpy.types.Collection]:
                 _ = parse_pof0(filename, file_contents, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
                 (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
-                collections.append(xj_to_blender_mesh(filename, root_node))
+                collections.append(xj_to_blender_mesh(filename, root_node, [])) # TODO: Import materials from xvm
                 need_pof0 = False
         prev_chunk_offset = chunk_offset
         prev_chunk_size = chunk_header.body_size
