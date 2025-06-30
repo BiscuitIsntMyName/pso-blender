@@ -20,12 +20,15 @@ NULLPTR = Numeric.NULLPTR
 
 
 def vertex_has_color(fmt: int) -> bool:
+    fmt = fmt & 0xffff
     return fmt == 4 or fmt == 5 or fmt == 6 or fmt == 7
 
 def vertex_has_normals(fmt: int) -> bool:
+    fmt = fmt & 0xffff
     return fmt == 2 or fmt == 3 or fmt == 6 or fmt == 7
 
 def vertex_has_uvs(fmt: int) -> bool:
+    fmt = fmt & 0xffff
     return fmt == 1 or fmt == 3 or fmt == 5 or fmt == 7
 
 @dataclass
@@ -573,7 +576,7 @@ def make_renderstate_args(
 def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.Material]) -> bpy.types.Collection:
     collection = bpy.data.collections.new("mesh_group_" + name)
 
-    world_scale = 1
+    world_scale = util.get_pso_world_scale()
 
     counter = 0
     # Find all meshes in model tree
@@ -623,11 +626,11 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
             has_normals = vertex_has_normals(vertex_buffer.vertex_format)
             has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
             for vertex in vertex_buffer.vertex_buffer:
-                vertices.append((-vertex.x, vertex.z, vertex.y))
+                vertices.append((vertex.x, -vertex.z, vertex.y))
                 if has_color:
                     colors.append((vertex.r, vertex.g, vertex.b))
                 if has_normals:
-                    normals.append((vertex.nx, vertex.ny, vertex.nz))
+                    normals.append((vertex.nx, -vertex.nz, vertex.ny))
                 if has_uvs:
                     uvs.append((vertex.u, vertex.v))
             vertex_sets.append(vertices)
@@ -689,11 +692,12 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
                     color_attribute.data[i].color[2] = colors[i][2] / 0xff
 
             # Apply transforms
-            util.scale_mesh(blender_mesh, node.scale_x, node.scale_z, node.scale_y)
             obj = bpy.data.objects.new(mesh_name, blender_mesh)
+            obj.scale = (node.scale_x / world_scale, node.scale_z / world_scale, node.scale_y / world_scale)
+            util.apply_transfrom(obj, use_scale=True)
             obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
             util.apply_transfrom(obj, use_rotation=True)
-            obj.location = (-node.x / world_scale, node.z / world_scale, node.y / world_scale)
+            obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
             util.apply_transfrom(obj, use_location=True)
 
             tex_to_mat_slot = dict()
@@ -725,27 +729,42 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
     return collection
 
 
-def write(xj_path: str, xvm_path: str, obj: bpy.types.Object):
-    texture_man = xvm.TextureManager([obj])
-    textures = texture_man.get_object_textures(obj)
+def write(xj_path: str, xvm_path: str, objs: list[bpy.types.Object]):
+    texture_man = xvm.TextureManager(objs)
+    textures = texture_man.get_all_textures()
 
     njcm_chunk = IffChunk("NJCM")
-    # Root node must to be the first thing after the chunk header
-    mesh_node = MeshTreeNode(
-        eval_flags=NinjaEvalFlag.UNIT_ANG | NinjaEvalFlag.UNIT_SCL | NinjaEvalFlag.BREAK,
-        mesh=0xdeadbeef, # Will be rewritten at the end
-        scale_x=1.0,
-        scale_y=1.0,
-        scale_z=1.0)
-    mesh_pointer_offset = njcm_chunk.write(mesh_node) + IffHeader.type_size() + 4
+    prev_node_link_offset = None
+    for i in range(len(objs)):
+        obj = objs[i]
 
-    blender_mesh = obj.to_mesh()
-    util.scale_mesh(blender_mesh, util.get_pso_world_scale())
-    mesh = make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
+        # Root node must to be the first thing after the chunk header, that's why we can't write the mesh first
+        mesh_node = MeshTreeNode(
+            eval_flags=NinjaEvalFlag.UNIT_ANG | NinjaEvalFlag.UNIT_SCL | NinjaEvalFlag.BREAK,
+            mesh=0xdeadbeef, # Will be rewritten at the end
+            scale_x=1.0,
+            scale_y=1.0,
+            scale_z=1.0)
 
-    # Write mesh pointer into root node
-    mesh_ptr = njcm_chunk.write(mesh)
-    pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, mesh_pointer_offset, mesh_ptr)
+        if i < len(objs) - 1:
+            # Has next?
+            mesh_node.next = 0xdeadbeef
+
+        node_ptr = njcm_chunk.write(mesh_node)
+        mesh_pointer_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("mesh")
+
+        blender_mesh = obj.to_mesh()
+        util.scale_mesh(blender_mesh, util.get_pso_world_scale())
+        mesh = make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
+
+        # Link previous node to this one
+        if prev_node_link_offset is not None:
+            pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, prev_node_link_offset, node_ptr)
+        prev_node_link_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("next")
+
+        # Write mesh pointer into root node
+        mesh_ptr = njcm_chunk.write(mesh)
+        pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, mesh_pointer_offset, mesh_ptr)
 
     # Chunk (+POF0) is done
     xj_buf = njcm_chunk.finish()
@@ -804,7 +823,8 @@ def read(path: str) -> list[bpy.types.Collection]:
                 _ = parse_pof0(filename, file_contents, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
                 (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
-                collections.append(xj_to_blender_mesh(filename, root_node, [])) # TODO: Import materials from xvm
+                models = xj_to_blender_mesh(filename, root_node, []) # TODO: Import materials from xvm
+                collections.append(models)
                 need_pof0 = False
         prev_chunk_offset = chunk_offset
         prev_chunk_size = chunk_header.body_size

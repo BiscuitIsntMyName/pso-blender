@@ -26,12 +26,8 @@ class ExportXj(Operator, ExportHelper):
 
     def execute(self, context):
         noext, ext = os.path.splitext(self.filepath)
-        # Try use selected if any
-        objs = self.only_meshes(bpy.context.selected_objects)
-        if len(objs) < 1:
-            # otherwise just use the first object
-            objs = self.only_meshes(bpy.data.objects)
-        xj.write(self.filepath, noext + ".xvm", objs[0])
+        objs = self.only_meshes(bpy.data.objects)
+        xj.write(self.filepath, noext + ".xvm", objs)
         return {"FINISHED"}
     
     def draw(self, context):
