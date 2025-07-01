@@ -1,4 +1,4 @@
-import bpy, os, warnings
+import bpy, os, warnings, bmesh
 from dataclasses import dataclass, field
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
@@ -573,159 +573,188 @@ def make_renderstate_args(
     return rs_args
 
 
-def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.Material]) -> bpy.types.Collection:
-    collection = bpy.data.collections.new("mesh_group_" + name)
-
+def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bpy.types.Material]) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
-    counter = 0
-    # Find all meshes in model tree
-    search_stack = [node]
-    while len(search_stack) > 0:
-        node = search_stack.pop()
+    # Group index buffers by their vertex buffer
+    grouped_alpha_index_buffers = {}
+    for index_buffer in node.mesh.alpha_index_buffers:
+        if index_buffer.vertex_buffer_index in grouped_alpha_index_buffers:
+            grouped_alpha_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
+        else:
+            grouped_alpha_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
+
+    grouped_opaque_index_buffers = {}
+    for index_buffer in node.mesh.index_buffers:
+        if index_buffer.vertex_buffer_index in grouped_opaque_index_buffers:
+            grouped_opaque_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
+        else:
+            grouped_opaque_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
+    
+    grouped_index_buffers = list(grouped_alpha_index_buffers.items()) + list(grouped_opaque_index_buffers.items())
+    all_index_buffers = node.mesh.alpha_index_buffers + node.mesh.index_buffers
+
+    # Get the attributes of each vertex buffer
+    vertex_sets = []
+    normal_sets = []
+    uv_sets = []
+    color_sets = []
+
+    for vertex_buffer in node.mesh.vertex_buffers:
+        vertices = []
+        colors = []
+        normals = []
+        uvs = []
+        has_color = vertex_has_color(vertex_buffer.vertex_format)
+        has_normals = vertex_has_normals(vertex_buffer.vertex_format)
+        has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
+        for vertex in vertex_buffer.vertex_buffer:
+            vertices.append((vertex.x, -vertex.z, vertex.y))
+            if has_color:
+                colors.append((vertex.r, vertex.g, vertex.b))
+            if has_normals:
+                normals.append((vertex.nx, -vertex.nz, vertex.ny))
+            if has_uvs:
+                uvs.append((vertex.u, vertex.v))
+        vertex_sets.append(vertices)
+        color_sets.append(colors)
+        normal_sets.append(normals)
+        uv_sets.append(uvs)
+
+    # Create one mesh for each vertex buffer (opaque and alpha separated)
+    # Then combine them into one object
+    # Index buffers that use the same vertex buffer can be combined into one mesh
+    combined_bmesh = bmesh.new()
+    for vertex_buffer_index, index_buffers in grouped_index_buffers:
+        vertices = vertex_sets[vertex_buffer_index]
+        colors = color_sets[vertex_buffer_index]
+        normals = normal_sets[vertex_buffer_index]
+        uvs = uv_sets[vertex_buffer_index]
+
+        faces = []
+
+        for index_buffer in index_buffers:
+            indices = index_buffer.index_buffer
+            for i in range(len(indices) - 2):
+                # Parsing a triangle strip
+                i0 = indices[i + 0]
+                i1 = indices[i + 1]
+                i2 = indices[i + 2]
+                # Ignore degenerate triangles
+                if i0 == i1 or i1 == i2 or i2 == i0:
+                    continue
+                if vertices[i0] == vertices[i1] or vertices[i1] == vertices[i2] or vertices[i2] == vertices[i0]:
+                    continue
+                if i % 2 == 1:
+                    i1, i2 = i2, i1
+                faces.append((i0, i1, i2))
+        
+        # Put geometry into blender object
+        mesh_name = "node_{}_vb_{}".format(node_id, vertex_buffer_index)
+        blender_mesh = bpy.data.meshes.new(mesh_name)
+        blender_mesh.from_pydata(vertices, [], faces)
+        blender_mesh.update()
+        combined_bmesh.from_mesh(blender_mesh)
+
+        # Add UVs if any
+        if len(uvs) > 0:
+            uv_attribute = blender_mesh.uv_layers.new()
+            # Convert from per-vertex to per-loop
+            for loop in blender_mesh.loops:
+                uv_attribute.uv[loop.index].vector[0] = uvs[loop.vertex_index][0]
+                uv_attribute.uv[loop.index].vector[1] = uvs[loop.vertex_index][1]
+
+        # Add normals if any
+        if len(normals) > 0:
+            # This function automatically converts from per-vertex to per-loop
+            blender_mesh.normals_split_custom_set_from_vertices(normals)
+
+        # Add vertex colors
+        color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
+        if len(colors) > 0:
+            for i in range(len(colors)):
+                color_attribute.data[i].color[0] = colors[i][0] / 0xff
+                color_attribute.data[i].color[1] = colors[i][1] / 0xff
+                color_attribute.data[i].color[2] = colors[i][2] / 0xff
+
+    # Create object
+    mesh_name = "node_{}_mesh".format(node_id)
+    obj_name = "node_{}".format(node_id)
+    combined_mesh = bpy.data.meshes.new(mesh_name)
+    combined_bmesh.to_mesh(combined_mesh)
+    obj = bpy.data.objects.new(obj_name, combined_mesh)
+    # Apply transforms
+    obj.scale = (node.scale_x / world_scale, node.scale_z / world_scale, node.scale_y / world_scale)
+    util.apply_transfrom(obj, use_scale=True)
+    obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
+    util.apply_transfrom(obj, use_rotation=True)
+    obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
+    util.apply_transfrom(obj, use_location=True)
+
+    tex_to_mat_slot = dict()
+    # Create vertex groups for materials
+    for i in range(len(all_index_buffers)):
+        index_buffer = all_index_buffers[i]
+        indices = index_buffer.index_buffer
+        vertex_group = obj.vertex_groups.new(name="index_buffer_" + str(i))
+        vertex_group.add(indices, 1.0, "ADD")
+        tex_idx = next((r.arg1 for r in index_buffer.renderstate_args if r.state_type == RenderStateType.TEXTURE_ID), None)
+        if tex_idx is None:
+            continue
+        slot_idx = None
+        if tex_idx in tex_to_mat_slot:
+            slot_idx = tex_to_mat_slot[tex_idx]
+        elif tex_idx < len(materials):
+            obj.data.materials.append(materials[tex_idx])
+            slot_idx = len(obj.data.materials) - 1
+            tex_to_mat_slot[tex_idx] = slot_idx
+        if slot_idx is None:
+            warnings.warn("Failed to apply material due to texture ID mismatch")
+        else:
+            for poly in obj.data.polygons:
+                if all(i in indices for i in poly.vertices):
+                    poly.material_index = slot_idx
+    
+    return obj
+
+
+def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.Material]) -> bpy.types.Collection:
+    collection = bpy.data.collections.new(name)
+
+    world_scale = util.get_pso_world_scale()
+    node_counter = 0
+    # Iterate tree and create a blender object for each node
+    # Nodes with meshes are turned into mesh objects and empty nodes into empty objects
+    # Hierarchy is maintained with blender's parenting system
+    tree_stack = [(node, None)] # (current_node, current_parent_object)
+    while len(tree_stack) > 0:
+        (node, parent_object) = tree_stack.pop()
 
         if node == NULLPTR:
             continue
-        
-        # Search children and siblings
-        search_stack.append(node.child)
-        search_stack.append(node.next)
 
         if node.mesh == NULLPTR:
-            continue
-
-        # Group index buffers by their vertex buffer
-        alpha_index_buffers = {}
-        for index_buffer in node.mesh.alpha_index_buffers:
-            if index_buffer.vertex_buffer_index in alpha_index_buffers:
-                alpha_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
-            else:
-                alpha_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
-
-        opaque_index_buffers = {}
-        for index_buffer in node.mesh.index_buffers:
-            if index_buffer.vertex_buffer_index in opaque_index_buffers:
-                opaque_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
-            else:
-                opaque_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
-        
-        combined_index_buffers = list(alpha_index_buffers.items()) + list(opaque_index_buffers.items())
-
-        # Get the attributes of each vertex buffer
-        vertex_sets = []
-        normal_sets = []
-        uv_sets = []
-        color_sets = []
-
-        for vertex_buffer in node.mesh.vertex_buffers:
-            vertices = []
-            colors = []
-            normals = []
-            uvs = []
-            has_color = vertex_has_color(vertex_buffer.vertex_format)
-            has_normals = vertex_has_normals(vertex_buffer.vertex_format)
-            has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
-            for vertex in vertex_buffer.vertex_buffer:
-                vertices.append((vertex.x, -vertex.z, vertex.y))
-                if has_color:
-                    colors.append((vertex.r, vertex.g, vertex.b))
-                if has_normals:
-                    normals.append((vertex.nx, -vertex.nz, vertex.ny))
-                if has_uvs:
-                    uvs.append((vertex.u, vertex.v))
-            vertex_sets.append(vertices)
-            color_sets.append(colors)
-            normal_sets.append(normals)
-            uv_sets.append(uvs)
-
-        # Create one mesh for each vertex buffer (opaque and alpha separated)
-        # Index buffers that use the same vertex buffer can be combined into one mesh
-        for vertex_buffer_index, index_buffers in combined_index_buffers:
-            vertices = vertex_sets[vertex_buffer_index]
-            colors = color_sets[vertex_buffer_index]
-            normals = normal_sets[vertex_buffer_index]
-            uvs = uv_sets[vertex_buffer_index]
-
-            faces = []
-
-            for index_buffer in index_buffers:
-                indices = index_buffer.index_buffer
-                for i in range(len(indices) - 2):
-                    # Parsing a triangle strip
-                    i0 = indices[i + 0]
-                    i1 = indices[i + 1]
-                    i2 = indices[i + 2]
-                    # Ignore degenerate triangles
-                    if i0 == i1 or i1 == i2 or i2 == i0:
-                        continue
-                    if vertices[i0] == vertices[i1] or vertices[i1] == vertices[i2] or vertices[i2] == vertices[i0]:
-                        continue
-                    if i % 2 == 1:
-                        i1, i2 = i2, i1
-                    faces.append((i0, i1, i2))
-            
-            # Put geometry into blender object
-            mesh_name = "mesh_" + name + "_" + str(counter)
-            blender_mesh = bpy.data.meshes.new(mesh_name)
-            blender_mesh.from_pydata(vertices, [], faces)
-            blender_mesh.update()
-
-            # Add UVs if any
-            if len(uvs) > 0:
-                uv_attribute = blender_mesh.uv_layers.new()
-                # Convert from per-vertex to per-loop
-                for loop in blender_mesh.loops:
-                    uv_attribute.uv[loop.index].vector[0] = uvs[loop.vertex_index][0]
-                    uv_attribute.uv[loop.index].vector[1] = uvs[loop.vertex_index][1]
-
-            # Add normals if any
-            if len(normals) > 0:
-                # This function automatically converts from per-vertex to per-loop
-                blender_mesh.normals_split_custom_set_from_vertices(normals)
-
-            # Add vertex colors
-            color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
-            if len(colors) > 0:
-                for i in range(len(colors)):
-                    color_attribute.data[i].color[0] = colors[i][0] / 0xff
-                    color_attribute.data[i].color[1] = colors[i][1] / 0xff
-                    color_attribute.data[i].color[2] = colors[i][2] / 0xff
-
-            # Apply transforms
-            obj = bpy.data.objects.new(mesh_name, blender_mesh)
-            obj.scale = (node.scale_x / world_scale, node.scale_z / world_scale, node.scale_y / world_scale)
-            util.apply_transfrom(obj, use_scale=True)
+            # Create empty object
+            obj = bpy.data.objects.new("node_{}".format(node_counter), None)
+            obj.empty_display_type = "SPHERE"
+            obj.empty_display_size = 0.01
+            obj.scale = (node.scale_x, node.scale_z, node.scale_y)
             obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
-            util.apply_transfrom(obj, use_rotation=True)
             obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
-            util.apply_transfrom(obj, use_location=True)
+        else:
+            obj = xj_node_to_blender_mesh(node, node_counter, materials)
 
-            tex_to_mat_slot = dict()
-            # Create vertex groups for materials
-            for i in range(len(index_buffers)):
-                index_buffer = index_buffers[i]
-                indices = index_buffer.index_buffer
-                vertex_group = obj.vertex_groups.new(name="index_buffer_" + str(i))
-                vertex_group.add(indices, 1.0, "ADD")
-                tex_idx = next((r.arg1 for r in index_buffer.renderstate_args if r.state_type == RenderStateType.TEXTURE_ID), None)
-                if tex_idx is None:
-                    continue
-                slot_idx = None
-                if tex_idx in tex_to_mat_slot:
-                    slot_idx = tex_to_mat_slot[tex_idx]
-                elif tex_idx < len(materials):
-                    obj.data.materials.append(materials[tex_idx])
-                    slot_idx = len(obj.data.materials) - 1
-                    tex_to_mat_slot[tex_idx] = slot_idx
-                if slot_idx is None:
-                    warnings.warn("Failed to apply material due to texture ID mismatch")
-                else:
-                    for poly in obj.data.polygons:
-                        if all(i in indices for i in poly.vertices):
-                            poly.material_index = slot_idx
+        collection.objects.link(obj)
 
-            collection.objects.link(obj)
-            counter += 1
+        if parent_object is not None:
+            obj.parent = parent_object
+
+        node_counter += 1
+
+        # Iterate children and siblings
+        tree_stack.append((node.child, obj))
+        tree_stack.append((node.next, parent_object))
+
     return collection
 
 
