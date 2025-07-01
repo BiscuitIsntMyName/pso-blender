@@ -743,6 +743,8 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
             obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
         else:
             obj = xj_node_to_blender_mesh(node, node_counter, materials)
+        
+        obj.njcm_settings.eval_flags = set(str(x) for x in util.get_set_bits(node.eval_flags))
 
         collection.objects.link(obj)
 
@@ -770,8 +772,13 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
         has_next = i < len(siblings) - 1
         has_children = len(obj.children) > 0
 
+        # Transform eval flags from blender format into actual bitfield
+        eval_flags = 0
+        for x in obj.njcm_settings.eval_flags:
+            eval_flags |= int(x)
+
         mesh_node = MeshTreeNode(
-            eval_flags=NinjaEvalFlag.UNIT_ANG | NinjaEvalFlag.UNIT_SCL | NinjaEvalFlag.BREAK,
+            eval_flags=eval_flags,
             scale_x=1.0,
             scale_y=1.0,
             scale_z=1.0)
@@ -824,12 +831,6 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
     textures = texture_man.get_all_textures()
     xj_buf = bytearray()
 
-    for obj in root_objs:
-        # Write root nodes as one chunk each
-        njcm_chunk = IffChunk("NJCM")
-        make_mesh_tree(njcm_chunk, [obj], texture_man)
-        xj_buf += njcm_chunk.finish()
-
     if len(textures) > 0:
         # Make NJTL chunk (doesn't contain pixel data)
         njtl_chunk = IffChunk("NJTL")
@@ -850,6 +851,12 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
 
         # Append NJTL
         xj_buf += njtl_chunk.finish()
+
+    for obj in root_objs:
+        # Write root nodes as one chunk each
+        njcm_chunk = IffChunk("NJCM")
+        make_mesh_tree(njcm_chunk, [obj], texture_man)
+        xj_buf += njcm_chunk.finish()
 
     return xj_buf
 

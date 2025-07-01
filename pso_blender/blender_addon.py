@@ -14,6 +14,7 @@ from .bml_export_menu import ExportBml
 from .xj_import_menu import ImportXj
 from .xj_export_menu import ExportXj
 from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel
+from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -64,7 +65,9 @@ classes = [
     ImportXj,
     ExportXj,
     XjMaterialSettings,
-    XjMaterialSettingsPanel
+    XjMaterialSettingsPanel,
+    NjcmNodeSettings,
+    NjcmNodeSettingsPanel
 ]
 
 
@@ -78,6 +81,7 @@ def register():
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     # Add settings to objects
     bpy.types.Object.rel_settings = PointerProperty(type=MeshRelSettings)
+    bpy.types.Object.njcm_settings = PointerProperty(type=NjcmNodeSettings)
     # Add settings to materials
     bpy.types.Material.xj_settings = PointerProperty(type=XjMaterialSettings)
     # Add hooks

@@ -140,3 +140,14 @@ def apply_transfrom(ob, use_location=False, use_rotation=False, use_scale=False)
         c.matrix_local = M @ c.matrix_local
         
     ob.matrix_basis = basis[0] @ basis[1] @ basis[2]
+
+
+def get_set_bits(n: int) -> list[int]:
+    bits = []
+    i = 0
+    while n:
+        if n & 1:
+            bits.append(1 << i)
+        n >>= 1
+        i += 1
+    return bits
