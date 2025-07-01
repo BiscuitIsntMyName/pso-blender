@@ -758,45 +758,77 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
     return collection
 
 
-def write(xj_path: str, xvm_path: str, objs: list[bpy.types.Object]):
-    texture_man = xvm.TextureManager(objs)
-    textures = texture_man.get_all_textures()
-
-    njcm_chunk = IffChunk("NJCM")
+def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], texture_man: xvm.TextureManager):
+    world_scale = util.get_pso_world_scale()
+    first_node_ptr = None
     prev_node_link_offset = None
-    for i in range(len(objs)):
-        obj = objs[i]
 
-        # Root node must to be the first thing after the chunk header, that's why we can't write the mesh first
+    for i in range(len(siblings)):
+        obj = siblings[i]
+
+        has_mesh = obj.data is not None
+        has_next = i < len(siblings) - 1
+        has_children = len(obj.children) > 0
+
         mesh_node = MeshTreeNode(
             eval_flags=NinjaEvalFlag.UNIT_ANG | NinjaEvalFlag.UNIT_SCL | NinjaEvalFlag.BREAK,
-            mesh=0xdeadbeef, # Will be rewritten at the end
             scale_x=1.0,
             scale_y=1.0,
             scale_z=1.0)
+        
+        if not has_mesh:
+            mesh_node.x = obj.location[0] * world_scale
+            mesh_node.y = obj.location[2] * world_scale
+            mesh_node.z = -obj.location[1] * world_scale
 
-        if i < len(objs) - 1:
-            # Has next?
+        # Pointers will be overwritten later but we need to mark them as non-null or they won't be saved in the POF0 table
+        if has_mesh:
+            mesh_node.mesh = 0xdeadbeef
+        if has_next:
             mesh_node.next = 0xdeadbeef
+        if has_children:
+            mesh_node.child = 0xdeadbeef
 
+        # Write node first, mainly just because the root 
         node_ptr = njcm_chunk.write(mesh_node)
-        mesh_pointer_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("mesh")
 
-        blender_mesh = obj.to_mesh()
-        util.scale_mesh(blender_mesh, util.get_pso_world_scale())
-        mesh = make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
+        if first_node_ptr is None:
+            first_node_ptr = node_ptr
 
+        if has_mesh:
+            # Create XJ mesh
+            blender_mesh = obj.to_mesh()
+            util.scale_mesh(blender_mesh, util.get_pso_world_scale())
+            mesh = make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
+
+            # Write mesh into chunk and mesh pointer into node
+            mesh_pointer_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("mesh")
+            mesh_ptr = njcm_chunk.write(mesh)
+            pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, mesh_pointer_offset, mesh_ptr)
+        
         # Link previous node to this one
         if prev_node_link_offset is not None:
             pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, prev_node_link_offset, node_ptr)
         prev_node_link_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("next")
 
-        # Write mesh pointer into root node
-        mesh_ptr = njcm_chunk.write(mesh)
-        pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, mesh_pointer_offset, mesh_ptr)
+        if has_children:
+            # Write children into chunk and child pointer into node
+            child_pointer_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("child")
+            child_ptr = make_mesh_tree(njcm_chunk, obj.children, texture_man)
+            pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, child_pointer_offset, child_ptr)
 
-    # Chunk (+POF0) is done
-    xj_buf = njcm_chunk.finish()
+    return first_node_ptr
+
+
+def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) -> bytearray:
+    textures = texture_man.get_all_textures()
+    xj_buf = bytearray()
+
+    for obj in root_objs:
+        # Write root nodes as one chunk each
+        njcm_chunk = IffChunk("NJCM")
+        make_mesh_tree(njcm_chunk, [obj], texture_man)
+        xj_buf += njcm_chunk.finish()
 
     if len(textures) > 0:
         # Make NJTL chunk (doesn't contain pixel data)
@@ -818,15 +850,21 @@ def write(xj_path: str, xvm_path: str, objs: list[bpy.types.Object]):
 
         # Append NJTL
         xj_buf += njtl_chunk.finish()
-    
-    obj.to_mesh_clear()
+
+    return xj_buf
+
+def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
+    all_objs = []
+    for obj in root_objs:
+        all_objs += obj.children_recursive
+    texture_man = xvm.TextureManager(all_objs)
+    xj_buf = make_xj(root_objs, texture_man)
 
     with open(xj_path, "wb") as f:
         f.write(xj_buf)
 
     if xvm_path and texture_man.has_textures():
-        xvm.write(xvm_path, textures)
-
+        xvm.write(xvm_path, texture_man.get_all_textures())
 
 def read(path: str) -> list[bpy.types.Collection]:
     filename = os.path.basename(path)

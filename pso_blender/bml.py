@@ -1,11 +1,10 @@
 from dataclasses import dataclass, field
-from struct import pack_into
 import bpy, os
 from warnings import warn
 from .serialization import Serializable, Numeric, FixedArray, ResizableBuffer
 from . import prs, njcm, xvm, xj, util, njm
 from .nj import nj_to_blender_mesh
-from .iff import IffChunk, IffHeader, parse_pof0
+from .iff import IffHeader, parse_pof0
 
 
 U8 = Numeric.U8
@@ -184,49 +183,14 @@ def write(bml_path: str, xvm_path: str):
     )
     bml_header.serialize_into(bml_buf)
 
-    chunk_header_size = IffHeader.type_size()
     file_alignment = 0x20 if bml_header.has_textures else 0x800
 
     # Collection = file inside BML
     for collection in objects_by_collection:
-        chunks_size_sum = 0
-        njcm_chunk = IffChunk("NJCM")
-        prev_node_next_offset = None
-        # Add all objects in collection to same node tree
-        for (i, obj) in enumerate(collection.models):
-            has_next = i < len(collection.models) - 1
-
-            mesh_node = njcm.MeshTreeNode(
-                eval_flags=xj.NinjaEvalFlag.UNIT_ANG | xj.NinjaEvalFlag.UNIT_SCL | xj.NinjaEvalFlag.BREAK,
-                mesh=0xdeadbeef, # Will be rewritten at the end
-                scale_x=1.0,
-                scale_y=1.0,
-                scale_z=1.0,
-                next=0xdeadbeef if has_next else NULLPTR)
-            
-            node_ptr = njcm_chunk.write(mesh_node)
-            mesh_pointer_offset = node_ptr + chunk_header_size + njcm.MeshTreeNode.offset_of("mesh")
-            next_pointer_offset = node_ptr + chunk_header_size + njcm.MeshTreeNode.offset_of("next")
-
-            # Make and write mesh
-            blender_mesh = obj.to_mesh()
-            util.scale_mesh(blender_mesh, util.get_pso_world_scale())
-            mesh = xj.make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
-            mesh_ptr = njcm_chunk.write(mesh)
-
-            # Write mesh pointer into node
-            pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, mesh_pointer_offset, mesh_ptr)
-            if prev_node_next_offset is not None:
-                # Link previous node to this one
-                pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, prev_node_next_offset, node_ptr)
-            prev_node_next_offset = next_pointer_offset
-            obj.to_mesh_clear()
-
-        # Chunk (+POF0) is done
         files_sum_before = files_buf.offset
-        njcm_chunk_buf = njcm_chunk.finish()
+        njcm_chunk_buf = xj.make_xj(collection.models, texture_man)
         files_buf.append(njcm_chunk_buf)
-        chunks_size_sum += len(njcm_chunk_buf)
+        chunks_size_sum = len(njcm_chunk_buf)
         compressed_size = chunks_size_sum
 
         # Add padding between files
