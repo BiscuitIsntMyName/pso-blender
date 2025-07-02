@@ -204,6 +204,9 @@ class TextureManager:
     def has_textures(self) -> bool:
         return len(self._textures_by_path) > 0
     
+    def object_has_textures(self, obj: bpy.types.Object) -> bool:
+        return len(get_object_diffuse_textures(obj)) > 0
+    
     def has_animated_textures(self) -> bool:
         for key in self._textures_by_path:
             if self._textures_by_path[key].image.source == "SEQUENCE":

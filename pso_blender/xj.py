@@ -325,11 +325,25 @@ def determine_vertex_format(has_textures: bool, has_vertex_colors: bool, use_nor
                 vertex_buffer = VertexBufferFormat1()
                 vertex_ctor = VertexFormat1
     else:
-        # Coords + color
-        vertex_format = 4
-        vertex_size = VertexFormat4.type_size()
-        vertex_buffer = VertexBufferFormat4()
-        vertex_ctor = VertexFormat4
+        if use_normals:
+            if has_vertex_colors:
+                # Coords + color + normals
+                vertex_format = 6
+                vertex_size = VertexFormat6.type_size()
+                vertex_buffer = VertexBufferFormat6()
+                vertex_ctor = VertexFormat6
+            else:
+                # Coords + normals
+                vertex_format = 2
+                vertex_size = VertexFormat2.type_size()
+                vertex_buffer = VertexBufferFormat2()
+                vertex_ctor = VertexFormat2
+        else:
+            # Coords + color
+            vertex_format = 4
+            vertex_size = VertexFormat4.type_size()
+            vertex_buffer = VertexBufferFormat4()
+            vertex_ctor = VertexFormat4
     return (vertex_format, vertex_size, vertex_buffer, vertex_ctor)
 
 
@@ -361,7 +375,7 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             if has_textures:
                 u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
                 vertex.u = u
-                vertex.v = v
+                vertex.v = 1.0 - v
             # Get colors
             if vertex_colors:
                 if vertex_colors.domain == "POINT":
@@ -412,7 +426,7 @@ class MaterialStrips:
 
 def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> list[MaterialStrips]:
     material_strips = []
-    if texture_man.has_textures():
+    if texture_man.object_has_textures(obj):
         material_faces = []
         # Get all faces grouped by their material, then stripify them
         for (mat_idx, mat_slot) in enumerate(obj.material_slots):
@@ -487,6 +501,9 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
 
 
 def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> Mesh:
+    if texture_man.object_has_textures(obj) and len(blender_mesh.uv_layers) < 1:
+        raise Exception("XJ error in object '{}': Object has texture but is missing UVs".format(obj.name))
+
     mesh = Mesh()
 
     normal_type = None
@@ -526,7 +543,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
                 has_vertex_alpha = True
                 break
     # Write various mesh data
-    write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.has_textures(), vertex_colors, normal_type)
+    write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.object_has_textures(obj), vertex_colors, normal_type)
     write_index_buffers(destination, obj, blender_mesh, mesh, texture_man, has_vertex_alpha)
     return mesh
 
