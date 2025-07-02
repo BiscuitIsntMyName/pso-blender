@@ -337,6 +337,7 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
     use_normals = normal_type is not None
 
     # One vertex per loop
+    # TODO: Should only use per-loop vertices when necessary
     (vertex_format, vertex_size, vertex_buffer, vertex_ctor) = determine_vertex_format(has_textures, bool(vertex_colors), use_normals)
 
     if obj.rel_settings.is_translucent:
@@ -363,8 +364,10 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
                 vertex.v = v
             # Get colors
             if vertex_colors:
-                # Assuming vertex colors are "face corner" type, i.e. per-loop
-                col = vertex_colors.data[loop_idx].color
+                if vertex_colors.domain == "POINT":
+                    col = vertex_colors.data[vert_idx].color
+                elif vertex_colors.domain == "CORNER":
+                    col = vertex_colors.data[loop_idx].color
                 # BGRA
                 # Need to clamp because light baking can cause values to go higher than normal
                 vertex.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
@@ -516,8 +519,8 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
         # Despite the names of the types, they appear to be identical
         if vertex_colors.data_type != "FLOAT_COLOR" and vertex_colors.data_type != "BYTE_COLOR":
             raise Exception("XJ error in object '{}': Invalid vertex color format '{}'.".format(obj.name, vertex_colors.data_type))
-        if vertex_colors.domain != "CORNER":
-            raise Exception("XJ error in object '{}': Invalid vertex color type '{}'. Please select 'Face Corner' when creating color attribute.".format(obj.name, vertex_colors.domain))
+        if vertex_colors.domain != "CORNER" and vertex_colors.domain != "POINT":
+            raise Exception("XJ error in object '{}': Invalid vertex color type '{}'. Please select 'Vertex' or 'Face Corner' when creating color attribute.".format(obj.name, vertex_colors.domain))
         for attr in vertex_colors.data:
             if attr.color[3] < 1:
                 has_vertex_alpha = True
