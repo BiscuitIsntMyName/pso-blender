@@ -447,7 +447,7 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             # Create render state args
             first_rs_arg_ptr = NULLPTR
             rs_args = material_strip_data.renderstate_args
-            if texture_man.has_textures():
+            if len(textures) > 0:
                 tex = textures[material_strip_data.material_index]
                 has_alpha = has_alpha or tex.has_alpha
                 rs_args += make_renderstate_args(
@@ -654,7 +654,6 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
         blender_mesh = bpy.data.meshes.new(mesh_name)
         blender_mesh.from_pydata(vertices, [], faces)
         blender_mesh.update()
-        combined_bmesh.from_mesh(blender_mesh)
 
         # Add UVs if any
         if len(uvs) > 0:
@@ -676,6 +675,9 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
                 color_attribute.data[i].color[0] = colors[i][0] / 0xff
                 color_attribute.data[i].color[1] = colors[i][1] / 0xff
                 color_attribute.data[i].color[2] = colors[i][2] / 0xff
+
+        # Combine with other vertex buffers
+        combined_bmesh.from_mesh(blender_mesh)
 
     # Create object
     mesh_name = "node_{}_mesh".format(node_id)
@@ -831,6 +833,7 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
     textures = texture_man.get_all_textures()
     xj_buf = bytearray()
 
+    # Apparently client wants NJTL to come first
     if len(textures) > 0:
         # Make NJTL chunk (doesn't contain pixel data)
         njtl_chunk = IffChunk("NJTL")
