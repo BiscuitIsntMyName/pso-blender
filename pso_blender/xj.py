@@ -635,7 +635,7 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
             if has_normals:
                 normals.append((vertex.nx, -vertex.nz, vertex.ny))
             if has_uvs:
-                uvs.append((vertex.u, vertex.v))
+                uvs.append((vertex.u, 1.0 - vertex.v))
         vertex_sets.append(vertices)
         color_sets.append(colors)
         normal_sets.append(normals)
