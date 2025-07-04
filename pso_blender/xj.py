@@ -896,12 +896,13 @@ def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
     if xvm_path and texture_man.has_textures():
         xvm.write(xvm_path, texture_man.get_all_textures())
 
-def read(path: str) -> list[bpy.types.Collection]:
-    filename = os.path.basename(path)
+def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
+    filename = os.path.basename(xj_path)
+    materials = xj_xvm.to_blender_materials(filename) if xj_xvm else []
     collections = []
     chunk_header_size = IffHeader.type_size()
 
-    with open(path, "rb") as f:
+    with open(xj_path, "rb") as f:
         file_contents = bytearray(f.read())
 
     # Read iff chunks
@@ -920,7 +921,7 @@ def read(path: str) -> list[bpy.types.Collection]:
                 _ = parse_pof0(filename, file_contents, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
                 (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
-                models = xj_to_blender_mesh(filename, root_node, []) # TODO: Import materials from xvm
+                models = xj_to_blender_mesh(filename, root_node, materials)
                 collections.append(models)
                 need_pof0 = False
         prev_chunk_offset = chunk_offset
