@@ -375,7 +375,7 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             if has_textures:
                 u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
                 vertex.u = u
-                vertex.v = 1.0 - v
+                vertex.v = v
             # Get colors
             if vertex_colors:
                 if vertex_colors.domain == "POINT":
@@ -725,7 +725,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
             if has_normals:
                 normals.append((vertex.nx, -vertex.nz, vertex.ny))
             if has_uvs:
-                uvs.append((vertex.u, 1.0 - vertex.v))
+                uvs.append((vertex.u, vertex.v))
         vertex_sets.append(vertices)
         color_sets.append(colors)
         normal_sets.append(normals)
