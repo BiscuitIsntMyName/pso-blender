@@ -1,4 +1,4 @@
-import os, pathlib, marshal, json, hashlib, warnings
+import os, pathlib, marshal, json, hashlib, warnings, time
 from dataclasses import dataclass, field
 import bpy
 import bpy.types
@@ -153,63 +153,66 @@ class Xvm(Serializable):
 
 class TextureManager:
     def __init__(self, objects: list[bpy.types.Object]):
-        import time
         # Create "unique" texture IDs
         self._base_id = int(time.time()) & 0xffffffff
         id_counter = self._base_id
-        # Use file path as an identifier for deduplicating textures
-        self._textures_by_path = dict()
+        self._textures_by_name = dict()
+
+        # First find all textures in given objects
+        all_textures = []
         for obj in objects:
             textures = get_object_diffuse_textures(obj)
-            including_animated_textures = []
 
-            # Get animated textures
             for tex in textures:
-                including_animated_textures.append(tex)
                 if tex.image.source == "SEQUENCE":
-                    other_frames = get_image_sequence_images(tex.image)[1:] # Skip first because we already added it
-                    tex.animation_frames = len(other_frames) + 1
-                    for frame in other_frames:
-                        including_animated_textures.append(
-                            Texture(generate_mipmaps=tex.generate_mipmaps, image=frame))
-
-            for tex in including_animated_textures:
-                w, h = tex.image.size
-                # If the image file is not found on disk the texture will still exist but without pixels
-                if w == 0 or h == 0 or len(tex.image.pixels) < 1:
-                    raise Exception("Error in texture '{}': Texture has no pixels. Does the image file exist on disk?".format(tex.image.filepath))
+                    # Get animated textures
+                    frames = get_image_sequence_images(tex.image)
+                    tex.animation_frames = len(frames)
+                    for frame in frames:
+                        all_textures.append(
+                            Texture(material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
                 else:
-                    # Deduplicate textures
-                    image_abs_path = tex.image.filepath_from_user()
-                    if image_abs_path not in self._textures_by_path:
-                        tex.id = id_counter # Assign ID
-                        self._textures_by_path[image_abs_path] = tex
-                        id_counter += 1
+                    all_textures.append(tex)
+        
+        # Sort textures by material name
+        all_textures.sort(key=lambda x: x.material_name)
+
+        # Try deduplicate textures
+        for tex in all_textures:
+            w, h = tex.image.size
+            # If the image file is not found on disk the texture will still exist but without pixels
+            if w == 0 or h == 0 or len(tex.image.pixels) < 1:
+                raise Exception("Error in texture '{}': Texture has no pixels. Does the image file exist on disk?".format(tex.image.filepath))
+            else:
+                image_name = tex.name
+                if image_name not in self._textures_by_name:
+                    tex.id = id_counter # Assign ID
+                    self._textures_by_name[image_name] = tex
+                    id_counter += 1
 
     def get_object_textures(self, obj: bpy.types.Object) -> list[Texture]:
         texture_ids = []
         textures = get_object_diffuse_textures(obj)
         for tex in textures:
-            path = tex.image.filepath_from_user()
-            if path in self._textures_by_path:
-                texture_ids.append(self._textures_by_path[path])
+            if tex.name in self._textures_by_name:
+                texture_ids.append(self._textures_by_name[tex.name])
         return texture_ids
     
     def get_all_textures(self) -> list[Texture]:
-        return list(self._textures_by_path.values())
+        return list(self._textures_by_name.values())
 
     def get_base_id(self) -> int:
         return self._base_id
     
     def has_textures(self) -> bool:
-        return len(self._textures_by_path) > 0
+        return len(self._textures_by_name) > 0
     
     def object_has_textures(self, obj: bpy.types.Object) -> bool:
         return len(get_object_diffuse_textures(obj)) > 0
     
     def has_animated_textures(self) -> bool:
-        for key in self._textures_by_path:
-            if self._textures_by_path[key].image.source == "SEQUENCE":
+        for key in self._textures_by_name:
+            if self._textures_by_name[key].image.source == "SEQUENCE":
                 return True
         return False
     
@@ -326,7 +329,7 @@ def write(path: str, textures: list[Texture]):
     cache_index = load_cache_index(cache_index_path)
     xvrs = []
     for tex in textures:
-        (_, basename) = os.path.split(tex.image.filepath)
+        (_, basename) = os.path.split(tex.name)
         cache_dir_path = os.path.join(dirname, cache_dir)
         pathlib.Path(cache_dir_path).mkdir(exist_ok=True) # Create dir if not exist
         xvr_basename = basename + xvr_ext

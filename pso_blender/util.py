@@ -16,13 +16,17 @@ def mesh_faces(mesh: bpy.types.Mesh) -> list[tuple[int, int, int]]:
 
 class Texture:
     id: int
+    name: str
+    material_name: str
     generate_mipmaps: bool
     has_alpha: bool
     image: bpy.types.Image
     animation_frames: int
 
-    def __init__(self, *args, id: int=None, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
+    def __init__(self, *args, id: int=None, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
+        self.name = image.filepath_from_user() or image.name # Path can be empty if texture was created programmatically
+        self.material_name = material_name
         self.image = image
         self.generate_mipmaps = generate_mipmaps
         self.animation_frames = animation_frames
@@ -45,7 +49,8 @@ def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
             continue
         for node in mat_slot.material.node_tree.nodes:
             if node.type == "TEX_IMAGE" and node.image:
-                textures.append(Texture(generate_mipmaps=mat_slot.material.xj_settings.generate_mipmaps, image=node.image))
+                textures.append(Texture(
+                    material_name=mat_slot.material.name, generate_mipmaps=mat_slot.material.xj_settings.generate_mipmaps, image=node.image))
                 break
     return textures
 

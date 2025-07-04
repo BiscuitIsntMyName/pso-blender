@@ -884,7 +884,7 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
     return xj_buf
 
 def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
-    all_objs = []
+    all_objs = root_objs.copy()
     for obj in root_objs:
         all_objs += obj.children_recursive
     texture_man = xvm.TextureManager(all_objs)
