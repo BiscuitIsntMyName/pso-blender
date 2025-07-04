@@ -280,8 +280,6 @@ def read(path: str) -> NrelFmt2:
 
 
 def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collection:
-    materials = nrel_xvm.to_blender_materials(name)
-
     collection = bpy.data.collections.new(name)
     world_scale = util.get_pso_world_scale()
 
@@ -309,7 +307,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
 
         tree_counter = 0
         for tree in chunk.static_mesh_trees:
-            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, materials)
+            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
             for obj in models.objects:
                 obj.rotation_euler = (chunk.rot_x / 0x7fff * -3.14, chunk.rot_z / 0x7fff * 3.14, chunk.rot_y / 0x7fff * 3.14)
                 util.apply_transfrom(obj, use_rotation=True)

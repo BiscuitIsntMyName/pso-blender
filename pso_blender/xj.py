@@ -1,4 +1,4 @@
-import bpy, os, warnings, bmesh
+import bpy, os, bmesh
 from dataclasses import dataclass, field
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
@@ -593,7 +593,97 @@ def make_renderstate_args(
     return rs_args
 
 
-def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bpy.types.Material]) -> bpy.types.Object:
+def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, material_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Material:
+    mat = bpy.data.materials.new("{}_node_{}_mat_{}".format(name, node_id, material_id))
+    mat.use_nodes = True
+    if mat.node_tree:
+        mat.node_tree.links.clear()
+        mat.node_tree.nodes.clear()
+    
+    tex_id = None
+
+    # Parse xj material settings
+    mat.xj_settings.lighting = False
+    for setting in index_buffer.renderstate_args:
+        t = setting.state_type
+        arg1 = setting.arg1
+        arg2 = setting.arg2
+        if t == RenderStateType.BLEND_MODE:
+            mat.xj_settings.src_blend = str(arg1)
+            mat.xj_settings.dst_blend = str(arg2)
+        elif t == RenderStateType.TEXTURE_ID:
+            tex_id = arg1
+        elif t == RenderStateType.TEXTURE_ADDRESSING:
+            # Enum doesn't match array in client because indices 0-2 are duplicates
+            # so we use this map to translate to the right enum values
+            modes = [
+                TextureAddressingMode.D3DTADDRESS_CLAMP,
+                TextureAddressingMode.D3DTADDRESS_MIRROR,
+                TextureAddressingMode.D3DTADDRESS_WRAP,
+                TextureAddressingMode.D3DTADDRESS_WRAP,
+                TextureAddressingMode.D3DTADDRESS_MIRROR,
+                TextureAddressingMode.D3DTADDRESS_CLAMP,
+                TextureAddressingMode.D3DTADDRESS_BORDER,
+                TextureAddressingMode.D3DTADDRESS_MIRRORONCE]
+            mat.xj_settings.tex_addr_u = str(modes[arg1])
+            mat.xj_settings.tex_addr_v = str(modes[arg2])
+        elif t == RenderStateType.MATERIAL:
+            mat.xj_settings.material1 = arg1
+            mat.xj_settings.material2 = arg2
+        elif t == RenderStateType.LIGHTING:
+            mat.xj_settings.lighting = bool(arg1)
+        elif t == RenderStateType.CAMERA_SPACE_NORMALS:
+            mat.xj_settings.camera_space_normals = bool(arg1)
+        elif t == RenderStateType.MATERIAL_SOURCE:
+            mat.xj_settings.diffuse_color_source = str(arg1)
+    
+    if tex_id is None:
+        img = None
+    else:
+        # Find old or create new image from xvr
+        xvr = xj_xvm.xvrs[tex_id]
+        img_name = "{}_xvr_{}".format(name, tex_id)
+        img_idx = bpy.data.images.find(img_name)
+        if img_idx == -1:
+            img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
+        else:
+            img = bpy.data.images[img_idx]
+        img.pixels = xvr.data
+
+    # Link texture and vcol as inputs with a mix node
+    output_node = mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial")
+    bsdf_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfDiffuse")
+    transparency_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfTransparent")
+    shader_mix_node = mat.node_tree.nodes.new(type="ShaderNodeMixShader")
+
+    vcol_node = mat.node_tree.nodes.new(type="ShaderNodeVertexColor")
+    vcol_node.layer_name = "vertex_color"
+
+    mix_node = mat.node_tree.nodes.new(type="ShaderNodeMix")
+    mix_node.data_type = "RGBA"
+    mix_node.blend_type = "MULTIPLY"
+    mix_node.inputs[0].default_value = 1.0
+
+    if img is None:
+        tex_node = None
+    else:
+        tex_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
+        tex_node.image = img
+        tex_node.extension = "MIRROR"
+
+    mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
+    mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
+    if tex_node is not None:
+        mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
+        mat.node_tree.links.new(tex_node.outputs[1], shader_mix_node.inputs[0])
+    mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
+    mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
+    mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])
+
+    return mat
+
+
+def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
     # Group index buffers by their vertex buffer
@@ -670,7 +760,7 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
                 faces.append((i0, i1, i2))
         
         # Put geometry into blender object
-        mesh_name = "node_{}_vb_{}".format(node_id, vertex_buffer_index)
+        mesh_name = "{}_node_{}_vb_{}".format(name, node_id, vertex_buffer_index)
         blender_mesh = bpy.data.meshes.new(mesh_name)
         blender_mesh.from_pydata(vertices, [], faces)
         blender_mesh.update()
@@ -700,8 +790,8 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
         combined_bmesh.from_mesh(blender_mesh)
 
     # Create object
-    mesh_name = "node_{}_mesh".format(node_id)
-    obj_name = "node_{}".format(node_id)
+    mesh_name = "{}_node_{}_mesh".format(name, node_id)
+    obj_name = "{}_node_{}".format(name, node_id)
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
     obj = bpy.data.objects.new(obj_name, combined_mesh)
@@ -713,34 +803,24 @@ def xj_node_to_blender_mesh(node: MeshTreeNode, node_id: int, materials: list[bp
     obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
     util.apply_transfrom(obj, use_location=True)
 
-    tex_to_mat_slot = dict()
-    # Create vertex groups for materials
+    # Create a material and vertex group for each index buffer
     for i in range(len(all_index_buffers)):
         index_buffer = all_index_buffers[i]
         indices = index_buffer.index_buffer
-        vertex_group = obj.vertex_groups.new(name="index_buffer_" + str(i))
+        vertex_group = obj.vertex_groups.new(name="{}_node_{}_ib_{}".format(name, node_id, i))
         vertex_group.add(indices, 1.0, "ADD")
-        tex_idx = next((r.arg1 for r in index_buffer.renderstate_args if r.state_type == RenderStateType.TEXTURE_ID), None)
-        if tex_idx is None:
-            continue
-        slot_idx = None
-        if tex_idx in tex_to_mat_slot:
-            slot_idx = tex_to_mat_slot[tex_idx]
-        elif tex_idx < len(materials):
-            obj.data.materials.append(materials[tex_idx])
-            slot_idx = len(obj.data.materials) - 1
-            tex_to_mat_slot[tex_idx] = slot_idx
-        if slot_idx is None:
-            warnings.warn("Failed to apply material due to texture ID mismatch")
-        else:
-            for poly in obj.data.polygons:
-                if all(i in indices for i in poly.vertices):
-                    poly.material_index = slot_idx
+        mat = make_material(name, index_buffer, node_id, i, xj_xvm)
+        obj.data.materials.append(mat)
+        mat_slot_idx = len(obj.data.materials) - 1
+        # Assign material to polys that belong to this index buffer
+        for poly in obj.data.polygons:
+            if all(i in indices for i in poly.vertices):
+                poly.material_index = mat_slot_idx
     
     return obj
 
 
-def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.Material]) -> bpy.types.Collection:
+def xj_to_blender_mesh(name: str, node: MeshTreeNode, xvm: xvm.Xvm) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
 
     world_scale = util.get_pso_world_scale()
@@ -764,7 +844,7 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, materials: list[bpy.types.
             obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
             obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
         else:
-            obj = xj_node_to_blender_mesh(node, node_counter, materials)
+            obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
         
         obj.njcm_settings.eval_flags = set(str(x) for x in util.get_set_bits(node.eval_flags))
 
@@ -898,7 +978,6 @@ def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
 
 def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
     filename = os.path.basename(xj_path)
-    materials = xj_xvm.to_blender_materials(filename) if xj_xvm else []
     collections = []
     chunk_header_size = IffHeader.type_size()
 
@@ -921,7 +1000,7 @@ def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
                 _ = parse_pof0(filename, file_contents, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
                 (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
-                models = xj_to_blender_mesh(filename, root_node, materials)
+                models = xj_to_blender_mesh(filename, root_node, xj_xvm)
                 collections.append(models)
                 need_pof0 = False
         prev_chunk_offset = chunk_offset

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-import bpy, os
+import bpy
 from warnings import warn
 from .serialization import Serializable, Numeric, FixedArray, ResizableBuffer
 from . import prs, njcm, xvm, xj, util, njm
@@ -128,12 +128,12 @@ def parse_bml(path: str) -> list[BmlItem]:
     return items
 
 
-def to_blender_mesh(bml_item: BmlItem, materials: list[bpy.types.Material]) -> list[bpy.types.Collection]:
+def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm) -> list[bpy.types.Collection]:
     collections = []
     if bml_item.name.endswith(".xj"):
         for model in bml_item.models:
             (root_node, _) = njcm.MeshTreeNode.read_tree(xj.Mesh, model, 0)
-            collections.append(xj.xj_to_blender_mesh(bml_item.name, root_node, materials))
+            collections.append(xj.xj_to_blender_mesh(bml_item.name, root_node, xvm))
     elif bml_item.name.endswith(".nj"):
         for model in bml_item.models:
             collections.append(nj_to_blender_mesh(bml_item.name, model, 0))
@@ -143,13 +143,11 @@ def to_blender_mesh(bml_item: BmlItem, materials: list[bpy.types.Material]) -> l
 
 
 def read(bml_path: str, bml_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
-    name = os.path.basename(bml_path)
-    materials = bml_xvm.to_blender_materials(name) if bml_xvm else []
     bml = parse_bml(bml_path)
     collections = []
     for bml_item in bml:
         if len(bml_item.models) > 0:
-            collections += to_blender_mesh(bml_item, materials)
+            collections += to_blender_mesh(bml_item, bml_xvm)
         else:
             warn("BML Warning: Skipping unsupported file '{}'.".format(bml_item.name))
     return collections
