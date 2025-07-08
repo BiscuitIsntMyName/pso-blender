@@ -1,11 +1,15 @@
-import os, pathlib, marshal, json, hashlib, warnings, time
+import os, pathlib, marshal, json, hashlib, warnings, time, sys
 from dataclasses import dataclass, field
 import bpy
 import bpy.types
 from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
-from . import dxt
 from .util import magic_field, Texture, get_object_diffuse_textures
 from .iff import IffHeader
+
+
+# Workaround for getting multiprocessing to work on Windows
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from . import dxt
 
 
 U8 = Numeric.U8
