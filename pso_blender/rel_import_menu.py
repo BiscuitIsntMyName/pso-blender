@@ -6,6 +6,9 @@ from . import c_rel, n_rel, xvm
 
 
 class ImportRel(Operator, ImportHelper):
+    "Import REL"
+
+
     bl_idname = "import_scene.rel"
     bl_label = "Import REL"
 

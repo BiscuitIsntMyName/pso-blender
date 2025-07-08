@@ -6,6 +6,9 @@ from . import bml, xvm
 
 
 class ImportBml(Operator, ImportHelper):
+    "Import BML"
+
+
     bl_idname = "import_scene.bml"
     bl_label = "Import BML"
 

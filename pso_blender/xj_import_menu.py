@@ -6,6 +6,10 @@ from . import xj, xvm
 
 
 class ImportXj(Operator, ImportHelper):
+    # This is the tooltip when you hover over the import button. Blender 4.4 seems to have a bug that causes a crash if the tooltip is empty lol
+    "Import XJ"
+
+
     bl_idname = "import_scene.xj"
     bl_label = "Import XJ"
 
