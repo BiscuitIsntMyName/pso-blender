@@ -637,7 +637,7 @@ def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, m
         elif t == RenderStateType.MATERIAL_SOURCE:
             mat.xj_settings.diffuse_color_source = str(arg1)
     
-    if tex_id is None:
+    if tex_id is None or xj_xvm is None:
         img = None
     else:
         # Find old or create new image from xvr
