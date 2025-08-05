@@ -648,7 +648,8 @@ def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, m
             img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
         else:
             img = bpy.data.images[img_idx]
-        img.pixels = xvr.data
+        if len(xvr.data) > 0:
+            img.pixels = xvr.data
 
     # Link texture and vcol as inputs with a mix node
     output_node = mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial")

@@ -289,7 +289,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
 
-        chunk.x *= -1
+        (chunk.y, chunk.z) = (-chunk.z, chunk.y)
         chunk.x /= world_scale
         chunk.y /= world_scale
         chunk.z /= world_scale
@@ -297,7 +297,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         bpy.ops.mesh.primitive_uv_sphere_add(
             segments=4,
             ring_count=4,
-            location=(chunk.x, chunk.z, chunk.y))
+            location=(chunk.x, chunk.y, chunk.z))
         obj = bpy.context.active_object
         obj.name = "chunk_marker_" + str(chunk.id)
         obj.rel_settings.is_chunk = True
@@ -309,12 +309,10 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         for tree in chunk.static_mesh_trees:
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
             for obj in models.objects:
-                obj.rotation_euler = (chunk.rot_x / 0x7fff * -3.14, chunk.rot_z / 0x7fff * 3.14, chunk.rot_y / 0x7fff * 3.14)
-                util.apply_transfrom(obj, use_rotation=True)
                 obj.location = (
-                    chunk.x + obj.location.x / world_scale,
-                    chunk.z + obj.location.y / world_scale,
-                    chunk.y + obj.location.z / world_scale)
+                    chunk.x + obj.location.x,
+                    chunk.y + obj.location.y,
+                    chunk.z + obj.location.z)
 
                 obj.rel_settings.is_nrel = True
 
