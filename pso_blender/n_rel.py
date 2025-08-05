@@ -2,6 +2,7 @@ import math
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
+from struct import unpack_from
 import bpy.types
 from .rel import Rel
 from .serialization import Serializable, Numeric, AlignedString, FixedArray
@@ -26,6 +27,9 @@ class MeshTreeFlag:
     RECEIVES_SHADOWS = 0x10
     HAS_UV_ANIMATION = 0x20
     HAS_TEXTURE_ANIMATION = 0x40
+    IS_STENCIL_VIEWER = 0x80
+    IS_STENCILED = 0x100
+    HAS_DOUBLE_POINTER_ROOT_NODE = 0x200
 
 
 @dataclass
@@ -192,6 +196,10 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
                 tree_flags |= MeshTreeFlag.RECEIVES_SHADOWS
             if anim_tex:
                 tree_flags |= MeshTreeFlag.HAS_TEXTURE_ANIMATION
+            if obj.rel_settings.is_stencil_viewer:
+                tree_flags |= MeshTreeFlag.IS_STENCIL_VIEWER
+            if obj.rel_settings.is_stenciled:
+                tree_flags |= MeshTreeFlag.IS_STENCILED
 
             static_mesh_tree = MeshTree(tree_flags=tree_flags)
 
@@ -199,10 +207,14 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
                 # Just use the texture id as the animation id
                 static_mesh_tree.texture_animation_info = rel.write(
                     TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff))
+            
+            eval_flags = 0
+            for x in obj.njcm_settings.eval_flags:
+                eval_flags |= int(x)
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
-            mesh_node = MeshTreeNode(
-                eval_flags=xj.NinjaEvalFlag.UNIT_ANG | xj.NinjaEvalFlag.UNIT_SCL | xj.NinjaEvalFlag.BREAK,
+            mesh_node = xj.MeshTreeNode(
+                eval_flags=eval_flags,
                 # Make coords relative to chunk
                 x=mesh_world_pos.x - chunk_world_pos.x,
                 y=mesh_world_pos.y - chunk_world_pos.y,
@@ -273,6 +285,11 @@ def read(path: str) -> NrelFmt2:
         chunk.animated_mesh_trees = anim_trees
 
         for tree in static_trees:
+            if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE and tree.root_node != NULLPTR:
+                # Resolve first pointer of double pointer
+                tree.root_node = unpack_from(Numeric.format_of_type(Ptr32), rel.buf.buffer, tree.root_node)[0]
+                tree.tree_flags &= ~MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE
+
             (root_node, _) = MeshTreeNode.read_tree(xj.Mesh, rel.buf.buffer, tree.root_node)
             tree.root_node = root_node
 
@@ -315,6 +332,11 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
                     chunk.z + obj.location.z)
 
                 obj.rel_settings.is_nrel = True
+                # Read settings
+                obj.rel_settings.receives_fog = not bool(tree.tree_flags & MeshTreeFlag.NO_FOG)
+                obj.rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
+                obj.rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
+                obj.rel_settings.is_stenciled = bool(tree.tree_flags & MeshTreeFlag.IS_STENCILED)
 
             chunk_coll.children.link(models)
             tree_counter += 1

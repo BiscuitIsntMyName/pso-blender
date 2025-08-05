@@ -276,19 +276,6 @@ class Mesh(Serializable):
         return (mesh, after)
 
 
-class NinjaEvalFlag:
-    UNIT_POS = 0b1 # Ignore translation
-    UNIT_ANG = 0b10 # Ignore rotation
-    UNIT_SCL = 0b100 # Ignore scaling
-    HIDE = 0b1000 # Do not draw model
-    BREAK = 0b10000 # Terimnate tracing children
-    ZXY_ANG = 0b100000
-    SKIP = 0b1000000
-    SHAPE_SKIP = 0b10000000
-    CLIP = 0b100000000
-    MODIFIER = 0b1000000000
-
-
 @dataclass
 class NormalType:
     Vertex = 1
@@ -711,6 +698,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     uv_sets = []
     color_sets = []
 
+    has_translucent_flag = False
     for vertex_buffer in node.mesh.vertex_buffers:
         vertices = []
         colors = []
@@ -719,6 +707,8 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         has_color = vertex_has_color(vertex_buffer.vertex_format)
         has_normals = vertex_has_normals(vertex_buffer.vertex_format)
         has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
+        if vertex_buffer.vertex_format & 0x10000:
+            has_translucent_flag = True
         for vertex in vertex_buffer.vertex_buffer:
             vertices.append((vertex.x, -vertex.z, vertex.y))
             if has_color:
@@ -796,6 +786,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
     obj = bpy.data.objects.new(obj_name, combined_mesh)
+    obj.rel_settings.is_translucent = has_translucent_flag
     # Apply transforms
     obj.scale = (node.scale_x / world_scale, node.scale_z / world_scale, node.scale_y / world_scale)
     util.apply_transfrom(obj, use_scale=True)

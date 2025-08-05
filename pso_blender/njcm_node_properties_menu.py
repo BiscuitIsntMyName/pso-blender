@@ -1,6 +1,6 @@
 import bpy
 from bpy.props import EnumProperty
-from . import xj
+from . import njcm
 
 
 def make_enum_prop_items(the_enum):
@@ -11,8 +11,8 @@ def make_enum_prop_items(the_enum):
 class NjcmNodeSettings(bpy.types.PropertyGroup):
     eval_flags: EnumProperty(
         name="Eval Flags",
-        default={str(xj.NinjaEvalFlag.UNIT_ANG), str(xj.NinjaEvalFlag.UNIT_SCL), str(xj.NinjaEvalFlag.BREAK)},
-        items=make_enum_prop_items(xj.NinjaEvalFlag),
+        default={str(njcm.NinjaEvalFlag.UNIT_ANG), str(njcm.NinjaEvalFlag.UNIT_SCL), str(njcm.NinjaEvalFlag.BREAK)},
+        items=make_enum_prop_items(njcm.NinjaEvalFlag),
         options={"ENUM_FLAG", "ANIMATABLE"})
 
 

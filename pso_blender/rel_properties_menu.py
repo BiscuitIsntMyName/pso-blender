@@ -16,6 +16,8 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     collision_flags_value2: IntProperty(default=0, subtype="UNSIGNED")
     is_translucent: BoolProperty(name="Translucent", default=False)
     always_rendered: BoolProperty(name="Always rendered", description="Object will not be affected by view distance and will always be rendered.", default=False)
+    is_stencil_viewer: BoolProperty(name="Stencil viewer", description="Stenciled objects will be visible when rendered behind this object.", default=False)
+    is_stenciled: BoolProperty(name="Stenciled", description="Object will only be visible when rendered behind a stencil viewer", default=False)
 
 
 def make_bitfield_props(setting_name, name_map):
@@ -72,6 +74,8 @@ class MeshNrelSettingsPanel(Panel):
         col.prop(settings, "receives_shadows")
         col.prop(settings, "receives_fog")
         col.prop(settings, "is_translucent")
+        col.prop(settings, "is_stencil_viewer")
+        col.prop(settings, "is_stenciled")
 
 
 class MeshCrelSettingsPanel(Panel):
