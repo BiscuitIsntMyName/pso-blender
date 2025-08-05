@@ -6,6 +6,9 @@ from . import xj
 
 
 class ExportXj(Operator, ExportHelper):
+    "Export XJ"
+
+
     bl_idname = "export_scene.xj"
     bl_label = "Export xj"
 

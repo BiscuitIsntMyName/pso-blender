@@ -6,6 +6,9 @@ from . import bml
 
 
 class ExportBml(Operator, ExportHelper):
+    "Export BML"
+
+
     bl_idname = "export_scene.bml"
     bl_label = "Export BML"
 
