@@ -326,10 +326,13 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
         for tree in chunk.static_mesh_trees:
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
             for obj in models.objects:
-                obj.location = (
-                    chunk.x + obj.location.x,
-                    chunk.y + obj.location.y,
-                    chunk.z + obj.location.z)
+                if not obj.parent:
+                    util.apply_transfrom(obj, use_location=True, use_rotation=True)
+                    obj.location = (
+                        chunk.x + obj.location.x,
+                        chunk.y + obj.location.y,
+                        chunk.z + obj.location.z)
+                    obj.rotation_euler = (chunk.rot_x / 0x7fff * 3.14, chunk.rot_z / 0x7fff * -3.14, chunk.rot_y / 0x7fff * 3.14)
 
                 obj.rel_settings.is_nrel = True
                 # Read settings

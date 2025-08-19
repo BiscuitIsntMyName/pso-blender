@@ -2,7 +2,7 @@ import bpy, os, bmesh
 from dataclasses import dataclass, field
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
-from .njcm import MeshTreeNode
+from .njcm import MeshTreeNode, NinjaEvalFlag
 from . import tristrip, util, xvm
 from .iff import IffHeader, IffChunk, parse_pof0
 from .njtl import TextureList, TextureListEntry
@@ -788,12 +788,17 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     obj = bpy.data.objects.new(obj_name, combined_mesh)
     obj.rel_settings.is_translucent = has_translucent_flag
     # Apply transforms
-    obj.scale = (node.scale_x / world_scale, node.scale_z / world_scale, node.scale_y / world_scale)
+    scale = (1.0 / world_scale, 1.0 / world_scale, 1.0 / world_scale)
+    if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
+        scale = (node.scale_x / world_scale, -node.scale_z / world_scale, node.scale_y / world_scale)
+    obj.scale = scale
     util.apply_transfrom(obj, use_scale=True)
-    obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
-    util.apply_transfrom(obj, use_rotation=True)
-    obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
-    util.apply_transfrom(obj, use_location=True)
+    if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
+        obj.rotation_euler = (node.rot_x / 0x7fff * 3.14, node.rot_z / 0x7fff * -3.14, node.rot_y / 0x7fff * 3.14)
+        util.apply_transfrom(obj, use_rotation=True)
+    if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
+        obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
+        util.apply_transfrom(obj, use_location=True)
 
     # Create a material and vertex group for each index buffer
     for i in range(len(all_index_buffers)):
@@ -832,9 +837,12 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, xvm: xvm.Xvm) -> bpy.types
             obj = bpy.data.objects.new("node_{}".format(node_counter), None)
             obj.empty_display_type = "SPHERE"
             obj.empty_display_size = 0.01
-            obj.scale = (node.scale_x, node.scale_z, node.scale_y)
-            obj.rotation_euler = (node.rot_x / 0x7fff * -3.14, node.rot_z / 0x7fff * 3.14, node.rot_y / 0x7fff * 3.14)
-            obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
+            if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
+                obj.scale = (node.scale_x, -node.scale_z, node.scale_y)
+            if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
+                obj.rotation_euler = (node.rot_x / 0x7fff * 3.14, node.rot_z / 0x7fff * -3.14, node.rot_y / 0x7fff * 3.14)
+            if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
+                obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
         else:
             obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
         
