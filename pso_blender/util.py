@@ -114,7 +114,7 @@ def get_pso_world_scale() -> float:
     return 33.0
 
 
-def apply_transfrom(ob, use_location=False, use_rotation=False, use_scale=False):
+def apply_transform(ob, use_location=False, use_rotation=False, use_scale=False):
     mb = ob.matrix_basis
     ident = Matrix()
     loc, rot, scale = mb.decompose()

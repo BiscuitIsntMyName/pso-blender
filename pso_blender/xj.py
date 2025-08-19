@@ -792,13 +792,13 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
         scale = (node.scale_x / world_scale, -node.scale_z / world_scale, node.scale_y / world_scale)
     obj.scale = scale
-    util.apply_transfrom(obj, use_scale=True)
+    util.apply_transform(obj, use_scale=True)
     if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
         obj.rotation_euler = (node.rot_x / 0x7fff * 3.14, node.rot_z / 0x7fff * -3.14, node.rot_y / 0x7fff * 3.14)
-        util.apply_transfrom(obj, use_rotation=True)
+        util.apply_transform(obj, use_rotation=True)
     if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
         obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
-        util.apply_transfrom(obj, use_location=True)
+        util.apply_transform(obj, use_location=True)
 
     # Create a material and vertex group for each index buffer
     for i in range(len(all_index_buffers)):
