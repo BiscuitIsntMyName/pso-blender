@@ -633,6 +633,15 @@ def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, m
         img_idx = bpy.data.images.find(img_name)
         if img_idx == -1:
             img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
+            # Determine alpha mode
+            has_alpha = xvr.flags & xvm.XvrFlags.ALPHA
+            has_premul_alpha = xvr.format == xvm.XvrFormat.DXT2 or xvr.format == xvm.XvrFormat.DXT4
+            if not has_alpha:
+                img.alpha_mode = "NONE"
+            elif has_premul_alpha:
+                img.alpha_mode = "PREMUL"
+            else:
+                img.alpha_mode = "STRAIGHT"
         else:
             img = bpy.data.images[img_idx]
         if len(xvr.data) > 0:

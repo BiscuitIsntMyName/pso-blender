@@ -117,6 +117,8 @@ def dxt1_compress_block(
 
 DXT_BLOCK_DIM = 4
 DXT1_BLOCK_SZ = 8
+DXT3_BLOCK_SZ = 16
+DXT5_BLOCK_SZ = 16
 
 
 def compress_image(pixels: list[float], img_width: int, img_height: int, src_channels: int, with_alpha: bool) -> bytearray:
@@ -142,54 +144,138 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
     return dst_buf
 
 
-def dxt1_decompress(data: bytearray, img_width: int, img_height: int) -> list[float]:
-    dst_chans = 4 # Blender always wants 4 channels
-    dst_buf = img_width * img_height * dst_chans * [0.0]
-    num_blocks = img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM)
+def decode_dxt_colors(src_buf: bytearray, src_offset: int, block_idx: int, img_width: int, img_height: int, dst_buf: list[float], dst_chans: int, is_dxt1: bool):
     palette_ratios_no_alpha = [1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0]
     palette_ratios_with_alpha = [1.0, 0.0, 0.5]
 
+    (color0, color1, color_indices) = struct.unpack_from("<HHL", src_buf, src_offset)
+
+    # Color order indicates if color3 is 1bit alpha
+    palette_with_alpha = is_dxt1 and color0 <= color1
+    palette_ratios = palette_ratios_with_alpha if palette_with_alpha else palette_ratios_no_alpha
+
+    color0 = decompose_rgb565(color0)
+    color1 = decompose_rgb565(color1)
+
+    # Pixel coords of block corner
+    px_x0 = block_idx % (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+    px_y0 = block_idx // (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+
+    # Iterate over block pixels
+    for block_px_i in range(DXT_BLOCK_DIM * DXT_BLOCK_DIM):
+        block_x = block_px_i % DXT_BLOCK_DIM
+        block_y = block_px_i // DXT_BLOCK_DIM
+        # Calculate pixel index (basically y*w+x)
+        px_i = ((px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
+
+        # Get color for this pixel
+        color_idx = color_indices & 0b11
+        color_indices = color_indices >> 2
+
+        if palette_with_alpha and color_idx == 3:
+            # Color3 is 1-bit alpha
+            dst_buf[px_i + 3] = 0.0
+        else:
+            # Get color from palette
+            ratio = palette_ratios[color_idx]
+            for chan in range(len(color0)):
+                # Add together portion of color0 and inverse portion of color1
+                part0 = ratio * (color0[chan] / 0xff)
+                part1 = (1.0 - ratio) * (color1[chan] / 0xff)
+                dst_buf[px_i + chan] = part0 + part1
+            # No alpha
+            dst_buf[px_i + 3] = 1.0
+
+
+def dxt1_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list[float]:
+    dst_chans = 4 # Blender always wants 4 channels
+    dst_buf = img_width * img_height * dst_chans * [0.0]
+    num_blocks = img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM)
+
     # Iterate over compressed blocks
     for block_idx in range(num_blocks):
-        # Read block data
-        (color0, color1, color_indices) = struct.unpack_from("<HHL", data, block_idx * DXT1_BLOCK_SZ)
+        colors_offset = block_idx * DXT1_BLOCK_SZ
+        decode_dxt_colors(src_buf, colors_offset, block_idx, img_width, img_height, dst_buf, dst_chans, True)
 
-        # Color order indicates if color3 is 1bit alpha
-        palette_with_alpha = color0 <= color1
-        palette_ratios = palette_ratios_with_alpha if palette_with_alpha else palette_ratios_no_alpha
+    return dst_buf
 
-        color0 = decompose_rgb565(color0)
-        color1 = decompose_rgb565(color1)
 
+def dxt3_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list[float]:
+    dst_chans = 4 # Blender always wants 4 channels
+    dst_buf = img_width * img_height * dst_chans * [0.0]
+    num_blocks = img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM)
+    alpha_table_size = 8
+
+    # Iterate over compressed blocks
+    for block_idx in range(num_blocks):
+        # Alpha palette is first then colors
+        alphas_offset = block_idx * DXT3_BLOCK_SZ
+        colors_offset = block_idx * DXT3_BLOCK_SZ + alpha_table_size
+        # Read and write colors first
+        decode_dxt_colors(src_buf, colors_offset, block_idx, img_width, img_height, dst_buf, dst_chans, False)
         # Pixel coords of block corner
         px_x0 = block_idx % (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
         px_y0 = block_idx // (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
-
-        # Iterate over block pixels
+        # Read and write alphas
+        (alpha_table, ) = struct.unpack_from("<Q", src_buf, alphas_offset)
         for block_px_i in range(DXT_BLOCK_DIM * DXT_BLOCK_DIM):
             block_x = block_px_i % DXT_BLOCK_DIM
             block_y = block_px_i // DXT_BLOCK_DIM
             # Calculate pixel index (basically y*w+x)
             px_i = ((px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
-
-            # Get color for this pixel
-            color_idx = color_indices & 0b11
-            color_indices = color_indices >> 2
-
-            if palette_with_alpha and color_idx == 3:
-                # Color3 is alpha
-                dst_buf[px_i + 3] = 0.0
-            else:
-                # Get color from palette
-                ratio = palette_ratios[color_idx]
-                for chan in range(len(color0)):
-                    # Add together portion of color0 and inverse portion of color1
-                    part0 = ratio * (color0[chan] / 0xff)
-                    part1 = (1.0 - ratio) * (color1[chan] / 0xff)
-                    dst_buf[px_i + chan] = part0 + part1
-                # No alpha
-                dst_buf[px_i + 3] = 1.0
+            # Unpack 4-bit alpha value
+            alpha_step = 0x11 # Distance between possible values when stretching 4-bit to 8-bit
+            alpha_value = ((alpha_table >> (block_px_i * 4)) & 0b1111) * alpha_step
+            dst_buf[px_i + 3] = alpha_value / 0xff
 
     return dst_buf
 
 
+def dxt5_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list[float]:
+    dst_chans = 4 # Blender always wants 4 channels
+    dst_buf = img_width * img_height * dst_chans * [0.0]
+    num_blocks = img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM)
+    alpha_data_size = 8
+    alpha_palette_size = 6
+
+    # Iterate over compressed blocks
+    for block_idx in range(num_blocks):
+        # Alpha palette is first then colors
+        alphas_offset = block_idx * DXT5_BLOCK_SZ
+        colors_offset = block_idx * DXT5_BLOCK_SZ + alpha_data_size
+        # Read and write colors first
+        decode_dxt_colors(src_buf, colors_offset, block_idx, img_width, img_height, dst_buf, dst_chans, False)
+        # Read and write alphas
+        alpha0 = src_buf[alphas_offset]
+        alpha1 = src_buf[alphas_offset + 1]
+        # Read 48-bit value
+        alpha_indices = 0
+        for i in range(alpha_palette_size):
+            alpha_indices = (alpha_indices << 8) | src_buf[alphas_offset + alpha_data_size - 1 - i]
+        # Pixel coords of block corner
+        px_x0 = block_idx % (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+        px_y0 = block_idx // (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
+        for block_px_i in range(DXT_BLOCK_DIM * DXT_BLOCK_DIM):
+            block_x = block_px_i % DXT_BLOCK_DIM
+            block_y = block_px_i // DXT_BLOCK_DIM
+            # Calculate pixel index (basically y*w+x)
+            px_i = ((px_y0 + block_y) * img_width + (px_x0 + block_x)) * dst_chans
+            # Lookup alpha with 3-bit index
+            alpha_idx = (alpha_indices >> (block_px_i * 3)) & 0b111
+            if alpha_idx == 0:
+                alpha_value = alpha0
+            elif alpha_idx == 1:
+                alpha_value = alpha1
+            elif alpha0 > alpha1:
+                # Interpolation method 1
+                alpha_value = (((8 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 7)
+            else:
+                if alpha_idx == 6:
+                    alpha_value = 0
+                elif alpha_idx == 7:
+                    alpha_value = 0xff
+                # Interpolation method 2
+                alpha_value = (((6 - i) * alpha0 + (i - 1) * alpha1) / 5)
+            dst_buf[px_i + 3] = alpha_value / 0xff
+
+    return dst_buf

@@ -47,10 +47,11 @@ class XvrFormat:
     DXT3 = 8
     DXT4 = 9
     DXT5 = 10
-    A8R8G8B8 = 11
-    R5G6B5 = 12
-    A1R5G5B5 = 13
-    A4R4G4B4 = 14
+    # Duplicates
+    #A8R8G8B8 = 11
+    #R5G6B5 = 12
+    #A1R5G5B5 = 13
+    #A4R4G4B4 = 14
     YUY2 = 15
     V8U8 = 16
     A8 = 17
@@ -317,6 +318,39 @@ def write(path: str, textures: list[Texture]):
         f.write(buf.buffer)
 
 
+def read_rgb565_texture(src_buf: bytearray) -> list[float]:
+    dst_chans = 4
+    dst_buf = len(src_buf) // 2 * dst_chans * [0.0]
+    for i in range(0, len(src_buf), 2):
+        (r, g, b) = dxt.decompose_rgb565(src_buf[i + 1] | src_buf[i + 0])
+        dst_i = i // 2 * dst_chans
+        dst_buf[dst_i + 0] = r / 0xff
+        dst_buf[dst_i + 1] = g / 0xff
+        dst_buf[dst_i + 2] = b / 0xff
+        dst_buf[dst_i + 3] = 1.0
+    return dst_buf
+
+
+def read_argb1555_texture(src_buf: bytearray) -> list[float]:
+    dst_chans = 4
+    dst_buf = len(src_buf) // 2 * dst_chans * [0.0]
+    for i in range(0, len(src_buf), 2):
+        rgb = src_buf[i + 1] | src_buf[i + 0]
+        a = rgb & 0b1
+        b = (rgb >> 5) & 0b11111
+        g = (rgb >> 10) & 0b11111
+        r = (rgb >> 15) & 0b11111
+        r = (r << 3) | (r >> 2)
+        g = (g << 3) | (g >> 2)
+        b = (b << 3) | (b >> 2)
+        dst_i = i // 2 * dst_chans
+        dst_buf[dst_i + 0] = r / 0xff
+        dst_buf[dst_i + 1] = g / 0xff
+        dst_buf[dst_i + 2] = b / 0xff
+        dst_buf[dst_i + 3] = a
+    return dst_buf
+
+
 def read(path: str) -> Xvm:
     try:
         with open(path, "rb") as f:
@@ -331,6 +365,14 @@ def read(path: str) -> Xvm:
         xvr.data = file_contents[data_offset : data_offset + xvr.data_size]
         if xvr.format == XvrFormat.DXT1:
             xvr.data = dxt.dxt1_decompress(xvr.data, xvr.width, xvr.height)
+        elif xvr.format == XvrFormat.DXT2 or xvr.format == XvrFormat.DXT3:
+            xvr.data = dxt.dxt3_decompress(xvr.data, xvr.width, xvr.height)
+        elif xvr.format == XvrFormat.DXT4 or xvr.format == XvrFormat.DXT5:
+            xvr.data = dxt.dxt5_decompress(xvr.data, xvr.width, xvr.height)
+        elif xvr.format == XvrFormat.R5G6B5:
+            xvr.data = read_rgb565_texture(xvr.data)
+        elif xvr.format == XvrFormat.A1R5G5B5:
+            xvr.data = read_argb1555_texture(xvr.data)
         else:
             warnings.warn("Unsupported XVR format: {}".format(xvr.format))
             xvr.data = []
