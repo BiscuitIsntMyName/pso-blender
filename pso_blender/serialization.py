@@ -1,7 +1,7 @@
 import sys
 from dataclasses import dataclass, field
 from typing import NewType, get_type_hints, get_args, get_origin, Annotated
-from struct import pack_into, unpack_from, error as StructError
+from struct import pack_into, unpack_from, error as StructError, calcsize
 from warnings import warn
 from operator import itemgetter
 
@@ -52,19 +52,24 @@ class Numeric:
         Numeric.endianness_prefix = ">"
 
     @staticmethod
-    def format_of_type(tp) -> str:
+    def format_of_type(tp, repeat=1) -> str:
         """Returns the structlib format of the given type"""
         entry = Numeric.type_info.get(tp.__name__)
         if not entry:
             return None
-        return Numeric.endianness_prefix + entry[1]
+        if repeat == 0:
+            return None
+        if repeat == 1:
+            return Numeric.endianness_prefix + entry[1]
+        return Numeric.endianness_prefix + str(repeat) + entry[1]
     
     @staticmethod
     def size_of_format(fmt: str) -> int:
-        size_sum = 0
-        for ch in fmt:
-            size_sum += Numeric.type_sizes.get(ch, 0)
-        return size_sum
+        return calcsize(fmt)
+    
+    @staticmethod
+    def is_numeric_type(tp) -> bool:
+        return tp.__name__ in Numeric.type_info
 
 
 # Create NewTypes and store them in Numeric class
@@ -102,7 +107,7 @@ class ResizableBuffer:
     def seek_to_end(self):
         self.offset = self.capacity
 
-    def pack(self, fmt: str, *vals) -> int:
+    def pack(self, fmt: str, vals) -> int:
         """Returns absolute offset of where data was written"""
         offset_before = self.offset
         item_size = Numeric.size_of_format(fmt)
@@ -111,7 +116,10 @@ class ResizableBuffer:
         if item_size > remaining:
             need = item_size - remaining
             self.grow_by(need)
-        pack_into(fmt, self.buffer, self.offset, *vals)
+        if hasattr(vals, "__iter__"):
+            pack_into(fmt, self.buffer, self.offset, *vals)
+        else:
+            pack_into(fmt, self.buffer, self.offset, vals)
         self.offset += item_size
         return offset_before
 
@@ -220,6 +228,10 @@ class Serializable:
                 # Can't continue
                 cls._warn_unserializable(name)
                 return None
+            # Fast-track arrays of numeric types
+            if len(elem_types) == 1 and Numeric.is_numeric_type(elem_types[0]):
+                return visitor(value=value, name=name, tp=tp, fmt=Numeric.format_of_type(elem_types[0], length), ctx=ctx)
+            # For non-numeric types we need to visit each element separately
             should_continue = True
             for i in range(length):
                 # Get type of current element
