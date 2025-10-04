@@ -266,10 +266,12 @@ class Mesh(Serializable):
     index_buffer_count: U32 = 0
     alpha_index_buffers: Ptr32 = NULLPTR # IndexBufferContainer
     alpha_index_buffer_count: U32 = 0
+    _offset = 0
 
     @classmethod
     def deserialize_from(cls, buf, offset):
         (mesh, after) = super(Mesh, cls).deserialize_from(buf, offset=offset)
+        mesh._offset = offset
         mesh.vertex_buffers = VertexBufferContainer.read_sequence(buf, mesh.vertex_buffers, mesh.vertex_buffer_count)
         mesh.index_buffers = IndexBufferContainer.read_sequence(buf, mesh.index_buffers, mesh.index_buffer_count)
         mesh.alpha_index_buffers = IndexBufferContainer.read_sequence(buf, mesh.alpha_index_buffers, mesh.alpha_index_buffer_count)
@@ -791,7 +793,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
 
     # Create object
     mesh_name = "{}_node_{}_mesh".format(name, node_id)
-    obj_name = "{}_node_{}".format(name, node_id)
+    obj_name = "{}_node_{}_0x{}".format(name, node_id, hex(node.mesh._offset))
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
     obj = bpy.data.objects.new(obj_name, combined_mesh)
