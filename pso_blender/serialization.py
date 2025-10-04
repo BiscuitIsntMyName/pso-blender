@@ -313,6 +313,7 @@ class Serializable:
     def deserialize_from(cls, buf, offset=0):
         """Assumes class has default constructor"""
         result = cls() # Default construct
+        result._offset = offset
         ctx = {"result": result, "offset": offset, "buf": buf}
         cls._visit(cls, ctx, Serializable._deserializer_visitor)
         return (result, ctx["offset"])

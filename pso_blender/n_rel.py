@@ -327,6 +327,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
             for obj in models.objects:
                 if not obj.parent:
+                    obj["tree_offset"] = hex(tree._offset)
                     util.apply_transform(obj, use_location=True, use_rotation=True)
                     obj.location = (
                         chunk.x + obj.location.x,
