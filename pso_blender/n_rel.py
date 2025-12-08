@@ -98,6 +98,7 @@ class NrelError(Exception):
 def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object]) -> dict[Chunk, list[bpy.types.Object]]:
     max_chunk_radius = 1200 # Approximation based on lowest value used by game
     chunk_to_children = dict()
+    collection_to_chunk = dict()
     chunk_flags = 0x00010000
     chunk_counter = 0
     # Chunk -1 will always be visible
@@ -110,15 +111,58 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
         z=0.0,
         radius=999999.0)
     chunk_to_children[always_rendered_chunk] = []
-    # If object is set to be always rendered then put it in chunk -1
+
+    ungrouped_objects = []
     for obj in objects:
+        parent_coll = obj.users_collection[0]
+        # If object is set to be always rendered then put it in chunk -1
         if obj.rel_settings.always_rendered:
             chunk_to_children[always_rendered_chunk].append(obj)
+        elif parent_coll.name.startswith("chunk"):
+            # Create a chunk if object belongs to a collection whose name starts with "chunk"
+            if parent_coll.name not in collection_to_chunk:
+                # Set chunk center later
+                new_chunk = Chunk(
+                    id=chunk_counter,
+                    flags=chunk_flags)
+                chunk_counter += 1
+                collection_to_chunk[parent_coll.name] = new_chunk
+                chunk_to_children[new_chunk] = []
+            chunk_to_children[collection_to_chunk[parent_coll.name]].append(obj)
+        else:
+            ungrouped_objects.append(obj)
+
+    for coll_name in collection_to_chunk:
+        # Calculate center point of each chunk
+        chunk = collection_to_chunk[coll_name]
+        objs = chunk_to_children[chunk]
+        chunk_center = Vector((0.0, 0.0, 0.0))
+        for obj in objs:
+            chunk_center += obj.location
+        chunk_center /= len(objs)
+        chunk_center *= util.get_pso_world_scale()
+        chunk_center = util.from_blender_axes(chunk_center)
+        chunk.x = chunk_center.x
+        chunk.y = chunk_center.y
+        chunk.z = chunk_center.z
+        # Calculate chunk radius
+        furthest_dist_sq = 0
+        for obj in objs:
+            obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
+            dist_sq = util.distance_squared(obj_center.xy, Vector((chunk_center.x, chunk_center.z, 0.0)).xy)
+            if dist_sq > furthest_dist_sq:
+                furthest_dist_sq = dist_sq
+        chunk.radius = math.sqrt(furthest_dist_sq)
+        if chunk.radius > max_chunk_radius:
+            warn("N.REL Warning: Distance between objects in chunk '{}' might be too large (expected maximum distance of {:.1f}, was {:.1f}).".format(
+                    coll_name, max_chunk_radius, chunk.radius))
+
     if len(chunk_markers) < 1:
         # No markers, put all meshes in the same chunk at 0,0,0
         warn("N.REL Warning: No chunk markers found in scene. Placing all meshes in default chunk.")
-        chunk_to_children[always_rendered_chunk] = objects
-        always_rendered_chunk.static_mesh_tree_count = len(objects)
+        chunk_to_children[always_rendered_chunk] += ungrouped_objects
+        always_rendered_chunk.static_mesh_tree_count += len(ungrouped_objects)
+        return chunk_to_children
     else:
         # Create a chunk for each marker
         for marker in chunk_markers:
@@ -129,11 +173,11 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
                 radius=float("-inf"),
                 x=marker_center.x,
                 y=0.0,
-                z=marker_center.z)
+                z=marker_center.y)
             chunk_to_children[chunk] = []
             chunk_counter += 1
-        # Find each object's nearest chunk
-        for obj in objects:
+        # Find each object's nearest chunk marker
+        for obj in ungrouped_objects:
             if obj.rel_settings.always_rendered:
                 continue
             obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
@@ -150,20 +194,22 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             chunk_to_children[nearest_chunk].append(obj)
             nearest_chunk.static_mesh_tree_count += 1
             # Also calculate chunk radius. Ensure object is definitely within radius by adding its greatest XZ dimension.
-            greatest_obj_dim = max(obj.dimensions.xz * util.get_pso_world_scale())
+            greatest_obj_dim = max(obj.dimensions.xy * util.get_pso_world_scale())
             radius = math.sqrt(nearest_dist_sq) + greatest_obj_dim
             if radius > nearest_chunk.radius:
                 nearest_chunk.radius = radius
                 if radius > max_chunk_radius:
                     warn("N.REL Warning: Object '{}' might be too far away from a chunk marker (expected maximum distance of {:.1f}, was {:.1f}).".format(
                         obj.name, max_chunk_radius, radius))
-        # Set chunk mesh counts
-        for chunk in list(chunk_to_children.keys()):
-            mesh_count = len(chunk_to_children[chunk])
-            chunk.static_mesh_tree_count = mesh_count
-            # Discard empty chunks
-            if mesh_count < 1:
-                del chunk_to_children[chunk]
+
+    # Set chunk mesh counts
+    for chunk in list(chunk_to_children.keys()):
+        mesh_count = len(chunk_to_children[chunk])
+        chunk.static_mesh_tree_count = mesh_count
+        # Discard empty chunks
+        if mesh_count < 1:
+            del chunk_to_children[chunk]
+
     return chunk_to_children
 
 
@@ -305,6 +351,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
     for chunk in nrel.chunks:
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
+        chunk_coll["chunk_offset"] = hex(chunk._offset)
 
         (chunk.y, chunk.z) = (-chunk.z, chunk.y)
         chunk.x /= world_scale
@@ -341,8 +388,10 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
                 obj.rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
                 obj.rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
                 obj.rel_settings.is_stenciled = bool(tree.tree_flags & MeshTreeFlag.IS_STENCILED)
-
-            chunk_coll.children.link(models)
+                # Make objects direct children of chunk collection instead
+                chunk_coll.objects.link(obj)
+            # Remove now empty collection
+            bpy.data.collections.remove(models)
             tree_counter += 1
 
     return collection

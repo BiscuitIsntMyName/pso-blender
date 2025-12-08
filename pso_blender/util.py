@@ -156,3 +156,10 @@ def get_set_bits(n: int) -> list[int]:
         n >>= 1
         i += 1
     return bits
+
+
+def get_parent_collection(child_collection: bpy.types.Collection) -> bpy.types.Collection:
+    for collection in bpy.data.collections:
+        if child_collection.name in collection.children.keys():
+            return collection
+    return None
