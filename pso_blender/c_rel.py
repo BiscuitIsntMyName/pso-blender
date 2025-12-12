@@ -267,13 +267,10 @@ def read(path: str) -> bpy.types.Collection:
     node_offset = crel.nodes
     while True:
         (node, next_offset) = rel.read(CrelNode, node_offset)
-        if not rel.is_nonnull_pointer(next_offset + 0):
-            break
         obj = to_blender_mesh(rel, node, node_idx)
         collection.objects.link(obj)
+        if not rel.is_nonnull_pointer(next_offset + 0):
+            break
         node_offset = next_offset
         node_idx += 1
-
     return collection
-
-
