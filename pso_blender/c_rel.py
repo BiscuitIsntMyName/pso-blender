@@ -247,10 +247,13 @@ def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object
     obj = bpy.data.objects.new("object_" + str(node_idx), blender_mesh)
     obj.rel_settings.collision_flags_value1 = node.flags & 0xffff
     obj.rel_settings.collision_flags_value2 = (node.flags >> 16) & 0xffff
+
+    world_scale = util.get_pso_world_scale()
+    util.scale_mesh(blender_mesh, 1 / world_scale, -1 / world_scale, 1 / world_scale)
     
-    obj.location.x = node.x
-    obj.location.y = node.z
-    obj.location.z = node.y
+    obj.location.x = node.x / world_scale
+    obj.location.y = -node.z / world_scale
+    obj.location.z = node.y / world_scale
 
     return obj
 
