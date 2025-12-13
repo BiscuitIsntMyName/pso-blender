@@ -580,7 +580,7 @@ def make_renderstate_args(
     return rs_args
 
 
-def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, material_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Material:
+def make_material(name: str, material_settings: RenderStateArgs, node_id: int, material_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Material:
     mat = bpy.data.materials.new("{}_node_{}_mat_{}".format(name, node_id, material_id))
     mat.use_nodes = True
     if mat.node_tree:
@@ -591,7 +591,7 @@ def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, m
 
     # Parse xj material settings
     mat.xj_settings.lighting = False
-    for setting in index_buffer.renderstate_args:
+    for setting in material_settings:
         t = setting.state_type
         arg1 = setting.arg1
         arg2 = setting.arg2
@@ -629,7 +629,7 @@ def make_material(name: str, index_buffer: IndexBufferContainer, node_id: int, m
     else:
         # Find old or create new image from xvr
         xvr = xj_xvm.xvrs[tex_id]
-        img_name = "{}_xvr_{}".format(name, tex_id)
+        img_name = "{}_xvr_{}".format(xj_xvm._filename, tex_id)
         img_idx = bpy.data.images.find(img_name)
         if img_idx == -1:
             img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
@@ -701,6 +701,25 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     grouped_index_buffers = list(grouped_alpha_index_buffers.items()) + list(grouped_opaque_index_buffers.items())
     all_index_buffers = node.mesh.alpha_index_buffers + node.mesh.index_buffers
 
+    # Create one material for each index buffer
+    index_buffer_materials = {}
+    # Sometimes a mesh assumes that it shares a material setting with the previously rendered mesh and omits that setting from its own settings.
+    # To replicate this we need to create a settings object that is the accumulation of all the previous settings.
+    accumulated_material_settings = []
+    for i, index_buffer in enumerate(all_index_buffers):
+        for setting in index_buffer.renderstate_args:
+            found = False
+            for old_setting in accumulated_material_settings:
+                if old_setting.state_type == setting.state_type:
+                    old_setting.arg1 = setting.arg1
+                    old_setting.arg2 = setting.arg2
+                    found = True
+                    break
+            if not found:
+                accumulated_material_settings.append(setting)
+        mat = make_material(name, accumulated_material_settings, node_id, i, xj_xvm)
+        index_buffer_materials[index_buffer._offset] = (i, mat)
+
     # Get the attributes of each vertex buffer
     vertex_sets = []
     normal_sets = []
@@ -765,6 +784,17 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         blender_mesh.from_pydata(vertices, [], faces)
         blender_mesh.update()
 
+        # Assign materials to polys
+        # We need to do this before combining the bmesh because the indices will get scrambled.
+        # But we can't add the materials to the mesh yet because they are not saved in the bmesh.
+        for index_buffer in index_buffers:
+            indices = index_buffer.index_buffer
+            # Assume mat slot index will hopefully match when we actually add the material later
+            (mat_slot_idx, mat) = index_buffer_materials[index_buffer._offset]
+            for poly in blender_mesh.polygons:
+                if all(i in indices for i in poly.vertices):
+                    poly.material_index = mat_slot_idx
+
         # Add UVs if any
         if len(uvs) > 0:
             uv_attribute = blender_mesh.uv_layers.new()
@@ -809,19 +839,13 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
         util.apply_transform(obj, use_location=True)
 
-    # Create a material and vertex group for each index buffer
-    for i in range(len(all_index_buffers)):
-        index_buffer = all_index_buffers[i]
+    # Add material and vertex group for each index buffer
+    for i, index_buffer in enumerate(all_index_buffers):
         indices = index_buffer.index_buffer
         vertex_group = obj.vertex_groups.new(name="{}_node_{}_ib_{}".format(name, node_id, i))
         vertex_group.add(indices, 1.0, "ADD")
-        mat = make_material(name, index_buffer, node_id, i, xj_xvm)
+        (_, mat) = index_buffer_materials[index_buffer._offset]
         obj.data.materials.append(mat)
-        mat_slot_idx = len(obj.data.materials) - 1
-        # Assign material to polys that belong to this index buffer
-        for poly in obj.data.polygons:
-            if all(i in indices for i in poly.vertices):
-                poly.material_index = mat_slot_idx
     
     return obj
 

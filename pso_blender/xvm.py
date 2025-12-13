@@ -106,6 +106,7 @@ class Xvm(Serializable):
     unk12: U32 = 0
     unk13: U32 = 0
     xvrs: list[Xvr] = field(default_factory=list)
+    _filename: str = ""
 
 
 class TextureManager:
@@ -379,4 +380,5 @@ def read(path: str) -> Xvm:
         xvm.xvrs.append(xvr)
         xvr_offset += xvr.body_size + IffHeader.type_size()
 
+    xvm._filename = os.path.basename(path)
     return xvm
