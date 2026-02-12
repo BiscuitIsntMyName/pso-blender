@@ -8,9 +8,11 @@ from .util import magic_field, Texture, get_object_diffuse_textures
 from .iff import IffHeader
 
 
-# Workaround for getting multiprocessing to work on Windows
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from . import dxt
+# Workaround for getting multiprocessing to work
+worker_path = os.path.dirname(os.path.abspath(__file__))
+if worker_path not in sys.path:
+    sys.path.insert(0, worker_path)
+import dxt
 
 
 U8 = Numeric.U8

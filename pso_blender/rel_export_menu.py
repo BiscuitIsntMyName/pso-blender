@@ -6,7 +6,6 @@ from bpy_extras.io_utils import ExportHelper
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context, Operator, Object
 
-from .rel_properties_menu import ObjectWithRelSettings
 from . import r_rel, n_rel, c_rel
 
 
@@ -50,6 +49,9 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         return {"FINISHED"}
     
     def export_all_by_tags(self):
+        # Avoid circular dependency
+        from .rel_properties_menu import ObjectWithRelSettings
+
         render_objs: list[Object] = []
         collision_objs: list[Object] = []
         minimap_objs: list[Object] = []
