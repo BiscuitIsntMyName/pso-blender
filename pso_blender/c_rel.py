@@ -7,7 +7,6 @@ import bpy.types
 from .rel import Rel
 from .serialization import Serializable, Numeric
 from . import util
-from pso_blender.rel_properties_menu import ObjectWithRelSettings
 
 
 U8 = Numeric.U8
@@ -108,6 +107,9 @@ class Crel(Serializable):
 
 
 def write(path: str, objects: list[bpy.types.Object]):
+    # Avoid circular dependency
+    from .rel_properties_menu import ObjectWithRelSettings
+
     rel = Rel()
     nodes: list[CrelNode] = []
     for obj in objects:
@@ -220,6 +222,9 @@ def flags_to_color(flags: int) -> tuple[float, float, float]:
 
 
 def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object:
+    # Avoid circular dependency
+    from .rel_properties_menu import ObjectWithRelSettings
+
     blender_vertices: list[tuple[float, float, float]] = []
     blender_edges: list[tuple[int, int, int]] = []
     blender_faces: list[tuple[int, int, int]] = []

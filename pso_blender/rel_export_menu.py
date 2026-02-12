@@ -2,12 +2,11 @@ import os
 from typing import cast, final, override
 from warnings import catch_warnings
 import bpy
-from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ExportHelper
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context, Operator, Object
 
-from pso_blender.rel_properties_menu import ObjectWithRelSettings
+from .rel_properties_menu import ObjectWithRelSettings
 from . import r_rel, n_rel, c_rel
 
 
@@ -31,15 +30,15 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
 
     filepath: StringProperty(subtype="FILE_PATH")
 
-    def cancel_with_error(self, ex: Exception) -> set[OperatorReturnItems]:
+    def cancel_with_error(self, ex: Exception):
         self.report({"ERROR"}, str(ex))
         return {"CANCELLED"}
     
-    def cancel_with_warning(self, msg: str) -> set[OperatorReturnItems]:
+    def cancel_with_warning(self, msg: str):
         self.report({"WARNING"}, msg)
         return {"CANCELLED"}
     
-    def export_all(self, minimap_objs: list[Object], render_objs: list[Object], collision_objs: list[Object], chunk_markers: list[Object]) -> set[OperatorReturnItems]:
+    def export_all(self, minimap_objs: list[Object], render_objs: list[Object], collision_objs: list[Object], chunk_markers: list[Object]):
         filepath = cast(str, self.filepath)
         noext, ext = os.path.splitext(filepath)
         if minimap_objs and len(minimap_objs) > 0:
@@ -50,7 +49,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
             c_rel.write(noext + "c" + ext, collision_objs)
         return {"FINISHED"}
     
-    def export_all_by_tags(self) -> set[OperatorReturnItems]:
+    def export_all_by_tags(self):
         render_objs: list[Object] = []
         collision_objs: list[Object] = []
         minimap_objs: list[Object] = []
@@ -68,7 +67,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         return self.export_all(minimap_objs, render_objs, collision_objs, chunk_markers)
 
     @override
-    def execute(self, context: Context) -> set[OperatorReturnItems]:
+    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         with catch_warnings(record=True) as warnings:
             result = self.export_all_by_tags()
             # Display warnings in the GUI

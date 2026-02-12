@@ -5,9 +5,9 @@ from dataclasses import dataclass, field
 
 from bpy.types import Collection, FloatColorAttribute, Material
 
-from pso_blender.njcm_node_properties_menu import ObjectWithNjcmSettings
-from pso_blender.rel_properties_menu import ObjectWithRelSettings
-from pso_blender.xj_material_properties_menu import MaterialWithXjSettings
+from .njcm_node_properties_menu import ObjectWithNjcmSettings
+from .rel_properties_menu import ObjectWithRelSettings
+from .xj_material_properties_menu import MaterialWithXjSettings
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
@@ -265,8 +265,8 @@ class IndexBufferContainer(Serializable):
     def deserialize_from(cls, buf: Buffer, offset: int=0):
         (container, after) = super(IndexBufferContainer, cls).deserialize_from(buf, offset)
         container.renderstate_args = RenderStateArgs.read_sequence(buf, container.renderstate_args, container.renderstate_args_count)
-        fmt = Numeric.format_of_type(U16, container.index_count)
-        container.index_buffer = unpack_from(fmt, buf, offset=container.index_buffer)
+        fmt = cast(str, Numeric.format_of_type(U16, container.index_count))
+        container.index_buffer = cast(tuple[int, ...], unpack_from(fmt, buf, offset=container.index_buffer))
         return (container, after)
 
 

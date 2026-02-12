@@ -1,5 +1,5 @@
 from struct import pack_into, unpack_from
-from typing import final, override
+from typing import cast, final, override
 from warnings import warn
 from .serialization import Serializable, ResizableBuffer, Numeric
 from .util import AbstractFileArchive
@@ -67,9 +67,9 @@ class Rel(AbstractFileArchive):
 
     @staticmethod
     def read_from(data: bytearray) -> "Rel":
-        (pointer_count, ) = unpack_from(Numeric.endianness_prefix + "L", data, Rel.POINTER_COUNT_OFFSET)
-        (pointer_table_offset, ) = unpack_from(Numeric.endianness_prefix + "L", data, Rel.POINTER_TABLE_POINTER_OFFSET)
-        (payload_offset, ) = unpack_from(Numeric.endianness_prefix + "L", data, Rel.PAYLOAD_POINTER_OFFSET)
+        (pointer_count, ) = cast(tuple[int], unpack_from(Numeric.endianness_prefix + "L", data, Rel.POINTER_COUNT_OFFSET))
+        (pointer_table_offset, ) = cast(tuple[int], unpack_from(Numeric.endianness_prefix + "L", data, Rel.POINTER_TABLE_POINTER_OFFSET))
+        (payload_offset, ) = cast(tuple[int], unpack_from(Numeric.endianness_prefix + "L", data, Rel.PAYLOAD_POINTER_OFFSET))
         rel = Rel(buf=ResizableBuffer(buf=data))
         rel.payload_offset = payload_offset
 
@@ -77,7 +77,7 @@ class Rel(AbstractFileArchive):
         prev_pointer_offset = 0
         for i in range(pointer_count):
             table_entry_offset = pointer_table_offset + i * pointer_size
-            (rel_offset, ) = unpack_from(Numeric.endianness_prefix + "H", data, table_entry_offset)
+            (rel_offset, ) = cast(tuple[int], unpack_from(Numeric.endianness_prefix + "H", data, table_entry_offset))
             abs_offset = prev_pointer_offset + rel_offset * 4
             prev_pointer_offset = abs_offset
             rel.pointer_offsets.append(abs_offset)

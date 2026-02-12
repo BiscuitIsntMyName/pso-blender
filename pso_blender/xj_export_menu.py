@@ -1,6 +1,5 @@
 from typing import cast, final, override
 import bpy, os
-from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ExportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
@@ -28,7 +27,7 @@ class ExportXj(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMet
     filepath: StringProperty(subtype="FILE_PATH")
 
     @override
-    def execute(self, context: Context) -> set[OperatorReturnItems]:
+    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         filepath = cast(str, self.filepath)
         noext, _ext = os.path.splitext(filepath)
         # Valid objects are top-level objects that either have a mesh or are empty

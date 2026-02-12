@@ -6,8 +6,8 @@ from warnings import warn
 from struct import unpack_from
 import bpy.types
 
-from pso_blender.njcm_node_properties_menu import ObjectWithNjcmSettings
-from pso_blender.rel_properties_menu import ObjectWithRelSettings
+from .njcm_node_properties_menu import ObjectWithNjcmSettings
+from .rel_properties_menu import ObjectWithRelSettings
 from .rel import Rel
 from .serialization import Serializable, Numeric, AlignedString, FixedArray
 from . import util, xvm, xj, tam
@@ -341,7 +341,8 @@ def read(path: str) -> NrelFmt2:
         for tree in static_trees:
             if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE and tree.root_node != NULLPTR:
                 # Resolve first pointer of double pointer
-                tree.root_node = unpack_from(Numeric.format_of_type(Ptr32), rel.buf.buffer, tree.root_node)[0]
+                fmt = cast(str, Numeric.format_of_type(Ptr32))
+                tree.root_node = cast(tuple[int], unpack_from(fmt, rel.buf.buffer, tree.root_node))[0]
                 tree.tree_flags &= ~MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE
 
             (root_node, _) = MeshTreeNode.read_tree(xj.Mesh, rel.buf.buffer, tree.root_node)

@@ -1,9 +1,8 @@
 import os, bpy
 from typing import cast, final, override
-from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Context, Operator
-from bpy.props import StringProperty
+from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from . import xj, xvm
 
 
@@ -30,7 +29,7 @@ class ImportXj(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMet
     directory: StringProperty(subtype="DIR_PATH")
 
     @override
-    def execute(self, context: Context) -> set[OperatorReturnItems]:
+    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         xj_path = None
         xvm_path = None
         selected_files = cast(bpy.types.OperatorFileListElement, self.files)

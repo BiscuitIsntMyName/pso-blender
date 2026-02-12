@@ -6,7 +6,6 @@ import bpy.types
 from dataclasses import field
 from abc import ABC, abstractmethod
 
-from pso_blender.xj_material_properties_menu import MaterialWithXjSettings
 from .serialization import Serializable
 
 
@@ -48,6 +47,9 @@ class Texture:
 
 def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
     """Assumes the first image node of each material is the correct one"""
+    # Avoid circular dependency
+    from .xj_material_properties_menu import MaterialWithXjSettings
+
     textures: list[Texture] = []
     for mat_slot in obj.material_slots:
         if not mat_slot.material or not mat_slot.material.node_tree:

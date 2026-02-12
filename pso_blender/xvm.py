@@ -225,7 +225,7 @@ def generate_mipmaps(image: bpy.types.Image, has_alpha: bool) -> list[bpy.types.
 
 
 def texture_checksum(tex: Texture) -> str:
-    data = cast(list[float], cast(Any, tex.image).pixels)
+    data = list(cast(Any, tex.image).pixels)
     data.append(float(tex.generate_mipmaps))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
 
@@ -377,8 +377,7 @@ def read(path: str) -> Xvm:
     (xvm, xvr_offset) = Xvm.deserialize_from(file_contents)
     for _ in range(xvm.xvr_count):
         (xvr, data_offset) = Xvr.deserialize_from(file_contents, xvr_offset)
-        compressed_data = bytearray(xvr.data)
-        pixels = file_contents[data_offset : data_offset + xvr.data_size]
+        compressed_data = file_contents[data_offset : data_offset + xvr.data_size]
         if xvr.format == XvrFormat.DXT1:
             pixels = dxt.dxt1_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.DXT2 or xvr.format == XvrFormat.DXT3:

@@ -219,7 +219,7 @@ def dxt3_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list
         px_x0 = block_idx % (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
         px_y0 = block_idx // (img_width // DXT_BLOCK_DIM) * DXT_BLOCK_DIM
         # Read and write alphas
-        (alpha_table, ) = struct.unpack_from("<Q", src_buf, alphas_offset)
+        (alpha_table, ) = cast(tuple[int], struct.unpack_from("<Q", src_buf, alphas_offset))
         for block_px_i in range(DXT_BLOCK_DIM * DXT_BLOCK_DIM):
             block_x = block_px_i % DXT_BLOCK_DIM
             block_y = block_px_i // DXT_BLOCK_DIM

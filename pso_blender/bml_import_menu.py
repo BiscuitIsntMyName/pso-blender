@@ -1,6 +1,5 @@
 from typing import cast, final, override
 import bpy, os
-from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
@@ -28,7 +27,7 @@ class ImportBml(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
     directory: StringProperty(subtype="DIR_PATH")
 
     @override
-    def execute(self, context: Context) -> set[OperatorReturnItems]:
+    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         bml_path = None
         xvm_path = None
         selected_files = cast(bpy.types.OperatorFileListElement, self.files)

@@ -1,4 +1,4 @@
-from typing import final, override
+from typing import cast, final, override
 from warnings import warn
 from struct import pack_into, unpack_from
 from dataclasses import dataclass, field
@@ -126,6 +126,6 @@ def parse_pof0(filename: str, file_data: bytearray, prev_chunk_offset: int, pof0
             raise Exception("Unknown POF0 flag in file '{}': {}".format(filename, hex(pof_flags)))
         # Offsets are relative to the previous offset and divided by four (similar to REL)
         pointer_offset += relative_offset * 4
-        (pointer, ) = unpack_from(Numeric.endianness_prefix + "L", file_data, offset=pointer_offset)
+        (pointer, ) = cast(tuple[int], unpack_from(Numeric.endianness_prefix + "L", file_data, offset=pointer_offset))
         pointer_table.append((pointer_offset, pointer))
     return pointer_table
