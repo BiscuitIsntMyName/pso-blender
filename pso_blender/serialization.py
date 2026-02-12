@@ -1,4 +1,5 @@
 from collections.abc import Buffer, Callable, Sequence
+from inspect import isclass
 import sys
 from dataclasses import dataclass, field
 from types import FunctionType
@@ -9,6 +10,7 @@ from operator import itemgetter
 
 
 def typehint_of_name(name: str, ns: Any=sys.modules[__name__]):
+    ns = ns if isclass(ns) else ns.__class__
     return get_type_hints(ns).get(name)
 
 
@@ -319,7 +321,7 @@ class Serializable:
                 # Rethrow with more info
                 orig_msg = err.args[0]
                 raise Exception("Serialization error in member '{}' with value '{}' and type '{}': {}".format(name, value, tp, orig_msg))
-        elif isinstance(tp, Buffer):
+        elif tp is bytes or tp is bytearray:
             ctx["buf"].append(value)
             offset = value
         if ctx["first_offset"] is None:
