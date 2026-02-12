@@ -1,3 +1,4 @@
+from typing import final
 import bpy
 from dataclasses import dataclass, field
 from .serialization import Serializable, Numeric, ResizableBuffer
@@ -15,6 +16,7 @@ Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
+@final
 class FrameType:
     UNKNOWN = 1
     SLIDESHOW = 2
@@ -40,14 +42,14 @@ class TamEntry(Serializable):
 def write(tam_path: str, texture_man: TextureManager, objs: list[bpy.types.Object]):
     Numeric.use_big_endian()
 
-    tam = ResizableBuffer(0)
+    tam = ResizableBuffer(size=0)
 
     for obj in objs:
         anim_tex = texture_man.get_object_animated_texture(obj)
         if not anim_tex or anim_tex.animation_frames < 1:
             continue
 
-        frames = []
+        frames: list[Keyframe] = []
         for i in range(anim_tex.animation_frames):
             # Assume frames are back to back in the texture archive
             frames.append(Keyframe(texture_index=anim_tex.id - texture_man.get_base_id() + i, frame_delay=1))
@@ -59,11 +61,11 @@ def write(tam_path: str, texture_man: TextureManager, objs: list[bpy.types.Objec
             frame_count=len(frames),
             frames=frames)
         
-        entry.serialize_into(tam)
+        _ = entry.serialize_into(tam)
 
-    TamEntry(frame_type=FrameType.TERMINATOR).serialize_into(tam)
+    _ = TamEntry(frame_type=FrameType.TERMINATOR).serialize_into(tam)
 
     with open(tam_path, "wb") as f:
-        f.write(tam.buffer)
+        _ = f.write(tam.buffer)
 
     Numeric.use_little_endian()

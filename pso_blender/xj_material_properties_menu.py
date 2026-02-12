@@ -1,13 +1,16 @@
+from typing import cast, final, override
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty  # pyright: ignore[reportUnknownVariableType]
+from bpy.types import Context
 from . import xj
 
 
-def make_enum_prop_items(the_enum):
+def make_enum_prop_items(the_enum: object):
     return [(str(the_enum.__dict__[name]), name, "", i)
         for (i, name) in enumerate(the_enum.__dict__) if not name.startswith("_")]
 
 
+# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class XjMaterialSettings(bpy.types.PropertyGroup):
     generate_mipmaps: BoolProperty(
         name="Generate Mipmaps",
@@ -43,6 +46,11 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         items=make_enum_prop_items(xj.MaterialColorSource))
 
 
+class MaterialWithXjSettings(bpy.types.Material):
+    xj_settings: XjMaterialSettings
+
+
+@final
 class XjMaterialSettingsPanel(bpy.types.Panel):
     bl_label = "XJ Settings"
     bl_idname = "MATERIAL_PT_XjMaterialSettingsPanel"
@@ -51,30 +59,33 @@ class XjMaterialSettingsPanel(bpy.types.Panel):
     bl_context = "material"
 
     @classmethod
-    def poll(self, context):
+    @override
+    def poll(cls, context: Context):
         return context.material is not None
     
-    def draw(self, context):
-        self.layout.use_property_split = True
-        self.layout.use_property_decorate = False
-        settings = context.material.xj_settings
-        self.layout.prop(settings, "generate_mipmaps")
-        self.layout.prop(settings, "lighting")
-        # Alpha blending
-        blend_box = self.layout.box()
-        blend_box.label(text="Alpha blending mode")
-        blend_input_col = blend_box.column(align=True)
-        blend_input_col.prop(settings, "src_blend")
-        blend_input_col.prop(settings, "dst_blend")
-        # Texture addressing
-        tex_addr_box = self.layout.box()
-        tex_addr_box.label(text="Texture addressing mode")
-        tex_addr_input_col = tex_addr_box.column(align=True)
-        tex_addr_input_col.prop(settings, "tex_addr_u")
-        tex_addr_input_col.prop(settings, "tex_addr_v")
-        # Other
-        self.layout.prop(settings, "camera_space_normals")
-        self.layout.prop(settings, "normal_type")
-        self.layout.prop(settings, "diffuse_color_source")
-        self.layout.prop(settings, "material1")
-        self.layout.prop(settings, "material2")
+    @override
+    def draw(self, context: Context):
+        if self.layout is not None and context.material is not None:
+            self.layout.use_property_split = True
+            self.layout.use_property_decorate = False
+            settings = cast(MaterialWithXjSettings, context.material).xj_settings
+            self.layout.prop(settings, "generate_mipmaps")
+            self.layout.prop(settings, "lighting")
+            # Alpha blending
+            blend_box = self.layout.box()
+            blend_box.label(text="Alpha blending mode")
+            blend_input_col = blend_box.column(align=True)
+            blend_input_col.prop(settings, "src_blend")
+            blend_input_col.prop(settings, "dst_blend")
+            # Texture addressing
+            tex_addr_box = self.layout.box()
+            tex_addr_box.label(text="Texture addressing mode")
+            tex_addr_input_col = tex_addr_box.column(align=True)
+            tex_addr_input_col.prop(settings, "tex_addr_u")
+            tex_addr_input_col.prop(settings, "tex_addr_v")
+            # Other
+            self.layout.prop(settings, "camera_space_normals")
+            self.layout.prop(settings, "normal_type")
+            self.layout.prop(settings, "diffuse_color_source")
+            self.layout.prop(settings, "material1")
+            self.layout.prop(settings, "material2")

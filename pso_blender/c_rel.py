@@ -1,10 +1,13 @@
+from collections.abc import Iterable
 import math, os
+from typing import cast, final
 from mathutils import Vector
 from dataclasses import dataclass, field
 import bpy.types 
 from .rel import Rel
 from .serialization import Serializable, Numeric
 from . import util
+from pso_blender.rel_properties_menu import ObjectWithRelSettings
 
 
 U8 = Numeric.U8
@@ -80,6 +83,7 @@ COLLISION_FLAG_TYPES = {
 
 
 @dataclass
+@final
 class TerrainFlag:
     Normal = 0x1
     ShallowWater = 0x2
@@ -105,14 +109,15 @@ class Crel(Serializable):
 
 def write(path: str, objects: list[bpy.types.Object]):
     rel = Rel()
-    nodes = []
+    nodes: list[CrelNode] = []
     for obj in objects:
         blender_mesh = obj.to_mesh()
 
         vertex_array = VertexArray()
         geom_center = util.from_blender_axes(util.geometry_world_center(obj) * util.get_pso_world_scale())
 
-        collision_flags = obj.rel_settings.collision_flags_value1 | (obj.rel_settings.collision_flags_value2 << 16)
+        rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+        collision_flags = cast(int, rel_settings.collision_flags_value1) | (cast(int, rel_settings.collision_flags_value2) << 16)
         terrain_vertex_groups = {
             TerrainFlag.Normal: obj.vertex_groups.get("terrain_normal"),
             TerrainFlag.ShallowWater: obj.vertex_groups.get("terrain_shallow"),
@@ -121,15 +126,15 @@ def write(path: str, objects: list[bpy.types.Object]):
             TerrainFlag.Grass: obj.vertex_groups.get("terrain_grass")}
 
         node = CrelNode(
-            flags=collision_flags,
-            x=geom_center[0],
-            y=geom_center[1],
-            z=geom_center[2])
+            flags=U32(collision_flags),
+            x=F32(geom_center[0]),
+            y=F32(geom_center[1]),
+            z=F32(geom_center[2]))
         farthest_sq = float("-inf")
         # Get vertices and find farthest vertex
         for local_vert in blender_mesh.vertices:
             world_vert = util.from_blender_axes(obj.matrix_world @ local_vert.co) * util.get_pso_world_scale()
-            farthest_sq = max(farthest_sq, util.distance_squared(geom_center.xz, world_vert.xz))
+            farthest_sq = max(farthest_sq, util.distance_squared(geom_center.xz.to_tuple(), world_vert.xz.to_tuple()))
             vertex_array.vertices.append(Vertex(
                 x=world_vert[0], y=world_vert[1], z=world_vert[2]))
         node.radius = math.sqrt(farthest_sq)
@@ -155,7 +160,7 @@ def write(path: str, objects: list[bpy.types.Object]):
                         continue
                     a = vertex_array.vertices[i].as_vector().xz * util.get_pso_world_scale()
                     b = vertex_array.vertices[j].as_vector().xz * util.get_pso_world_scale()
-                    farthest_sq = max(farthest_sq, util.distance_squared(a, b))
+                    farthest_sq = max(farthest_sq, util.distance_squared(a.to_tuple(), b.to_tuple()))
             # Check if face in terrain vertex group
             terrain_flags = TerrainFlag.Normal
             for flag in terrain_vertex_groups:
@@ -165,7 +170,7 @@ def write(path: str, objects: list[bpy.types.Object]):
                 for vert_i in indices:
                     try:
                         # Will throw if vertex not in group
-                        vgroup.weight(vert_i)
+                        _ = vgroup.weight(vert_i)
                     except RuntimeError:
                         break
                 else:
@@ -186,9 +191,10 @@ def write(path: str, objects: list[bpy.types.Object]):
                 nz=normal[2]))
             if first_face_ptr is None:
                 first_face_ptr = ptr
-        mesh.faces = first_face_ptr
+        if first_face_ptr is not None:
+            mesh.faces = Ptr32(first_face_ptr)
 
-        node.mesh = rel.write(mesh)
+        node.mesh = Ptr32(rel.write(mesh))
         nodes.append(node)
 
         obj.to_mesh_clear() # Delete temporary mesh
@@ -199,9 +205,12 @@ def write(path: str, objects: list[bpy.types.Object]):
         ptr = rel.write(node)
         if first_node_ptr is None:
             first_node_ptr = ptr
-    file_contents = rel.finish(rel.write(Crel(nodes=first_node_ptr)))
+    crel = Crel()
+    if first_node_ptr is not None:
+        crel.nodes = Ptr32(first_node_ptr)
+    file_contents = rel.finish(rel.write(crel))
     with open(path, "wb") as f:
-        f.write(file_contents)
+        _ = f.write(file_contents)
 
 
 def flags_to_color(flags: int) -> tuple[float, float, float]:
@@ -211,32 +220,33 @@ def flags_to_color(flags: int) -> tuple[float, float, float]:
 
 
 def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object:
-    blender_vertices = []
-    blender_edges = []
-    blender_faces = []
+    blender_vertices: list[tuple[float, float, float]] = []
+    blender_edges: list[tuple[int, int, int]] = []
+    blender_faces: list[tuple[int, int, int]] = []
     (mesh, _) = rel.read(Mesh, node.mesh)
     blender_mesh = bpy.data.meshes.new("mesh_" + str(node_idx))
-    faces = []
+    faces: list[Face] = []
 
     vertex_size = Vertex.type_size()
     for i in range(mesh.vertex_count):
         (vertex, _) = rel.read(Vertex, mesh.vertices + vertex_size * i)
-        coords = [vertex.x - node.x, vertex.z - node.z, vertex.y - node.y]
+        coords = (vertex.x - node.x, vertex.z - node.z, vertex.y - node.y)
         blender_vertices.append(coords)
 
     face_size = Face.type_size()
     for i in range(mesh.face_count):
         (face, _) = rel.read(Face, mesh.faces + face_size * i)
-        indices = [face.index0, face.index1, face.index2]
+        indices = (face.index0, face.index1, face.index2)
         blender_faces.append(indices)
         faces.append(face)
 
     blender_mesh.from_pydata(blender_vertices, blender_edges, blender_faces)
     blender_mesh.update()
 
-    face_colors = blender_mesh.attributes.new("collision_type_color", "BYTE_COLOR", "CORNER")
+    face_colors = cast(bpy.types.FloatColorAttribute, blender_mesh.attributes.new("collision_type_color", "BYTE_COLOR", "CORNER"))
     for (face_idx, poly) in enumerate(blender_mesh.polygons):
-        for loop_idx in poly.loop_indices:
+        loop_indices = cast(Iterable[int], poly.loop_indices)
+        for loop_idx in loop_indices:
             color = flags_to_color(faces[face_idx].flags)
             out = face_colors.data[loop_idx].color
             out[0] = color[0]
@@ -245,8 +255,9 @@ def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object
             out[3] = 1.0
 
     obj = bpy.data.objects.new("object_" + str(node_idx), blender_mesh)
-    obj.rel_settings.collision_flags_value1 = node.flags & 0xffff
-    obj.rel_settings.collision_flags_value2 = (node.flags >> 16) & 0xffff
+    rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+    rel_settings.collision_flags_value1 = node.flags & 0xffff
+    rel_settings.collision_flags_value2 = (node.flags >> 16) & 0xffff
 
     world_scale = util.get_pso_world_scale()
     util.scale_mesh(blender_mesh, 1 / world_scale, -1 / world_scale, 1 / world_scale)
@@ -264,6 +275,9 @@ def read(path: str) -> bpy.types.Collection:
 
     with open(path, "rb") as f:
         rel = Rel.read_from(bytearray(f.read()))
+    if rel.payload_offset is None:
+        raise Exception("Rel error in file '{}': Missing payload".format(filename))
+
     (crel, _) = rel.read(Crel, rel.payload_offset)
 
     node_idx = 0

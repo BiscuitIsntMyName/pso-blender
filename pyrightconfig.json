@@ -1,0 +1,9 @@
+{
+    "reportExplicitAny": false,
+    "reportAny": false,
+    "reportIgnoreCommentWithoutRule": false,
+    "ignore": [
+        "pso_blender/tristrip/*",
+        "**/site-packages/**"
+    ],
+}

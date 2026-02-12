@@ -1,3 +1,4 @@
+from typing import Any, cast, final
 import os, pathlib, marshal, json, hashlib, warnings, time, sys
 from dataclasses import dataclass, field
 import bpy
@@ -26,7 +27,7 @@ NULLPTR = Numeric.NULLPTR
 # Can't figure out how to get all of the frames out of an image sequence shader node, so we need to do it like this
 def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
     dirname = os.path.dirname(img.filepath_from_user())
-    frame_names = []
+    frame_names: list[str] = []
     for item in os.listdir(dirname):
         if os.path.isfile(os.path.join(dirname, item)):
             frame_names.append(item)
@@ -36,6 +37,7 @@ def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
         for name in sorted(frame_names, key=lambda key: int(os.path.basename(os.path.splitext(key)[0])))]
 
 
+@final
 class XvrFormat:
     A8R8G8B8 = 1
     R5G6B5 = 2
@@ -59,6 +61,7 @@ class XvrFormat:
     X8R8G8B8 = 19
 
 
+@final
 class XvrFlags:
     MIPMAPS = 1
     ALPHA = 2
@@ -108,8 +111,16 @@ class Xvm(Serializable):
     xvrs: list[Xvr] = field(default_factory=list)
     _filename: str = ""
 
+    def set_filename(self, filename: str):
+        self._filename = filename
+    
+    def get_filename(self) -> str:
+        return self._filename
 
 class TextureManager:
+    _base_id: int
+    _textures_by_name: dict[str, Texture]
+
     def __init__(self, objects: list[bpy.types.Object]):
         # Create "unique" texture IDs
         self._base_id = int(time.time()) & 0xffffffff
@@ -117,10 +128,9 @@ class TextureManager:
         self._textures_by_name = dict()
 
         # First find all textures in given objects
-        all_textures = []
+        all_textures: list[Texture] = []
         for obj in objects:
             textures = get_object_diffuse_textures(obj)
-
             for tex in textures:
                 if tex.image.source == "SEQUENCE":
                     # Get animated textures
@@ -128,7 +138,7 @@ class TextureManager:
                     tex.animation_frames = len(frames)
                     for frame in frames:
                         all_textures.append(
-                            Texture(material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
+                            Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
                 else:
                     all_textures.append(tex)
         
@@ -139,7 +149,7 @@ class TextureManager:
         for tex in all_textures:
             w, h = tex.image.size
             # If the image file is not found on disk the texture will still exist but without pixels
-            if w == 0 or h == 0 or len(tex.image.pixels) < 1:
+            if w == 0 or h == 0 or len(tex.image.pixels) < 1:  # pyright: ignore[reportArgumentType]
                 raise Exception("Error in texture '{}': Texture has no pixels. Does the image file exist on disk?".format(tex.image.filepath))
             else:
                 image_name = tex.name
@@ -149,12 +159,12 @@ class TextureManager:
                     id_counter += 1
 
     def get_object_textures(self, obj: bpy.types.Object) -> list[Texture]:
-        texture_ids = []
-        textures = get_object_diffuse_textures(obj)
-        for tex in textures:
+        textures: list[Texture] = []
+        all_textures = get_object_diffuse_textures(obj)
+        for tex in all_textures:
             if tex.name in self._textures_by_name:
-                texture_ids.append(self._textures_by_name[tex.name])
-        return texture_ids
+                textures.append(self._textures_by_name[tex.name])
+        return textures
     
     def get_all_textures(self) -> list[Texture]:
         return list(self._textures_by_name.values())
@@ -174,7 +184,7 @@ class TextureManager:
                 return True
         return False
     
-    def get_object_animated_texture(self, obj: bpy.types.Object) -> Texture:
+    def get_object_animated_texture(self, obj: bpy.types.Object) -> Texture | None:
         for tex in self.get_object_textures(obj):
             if tex.image.source == "SEQUENCE":
                 return tex
@@ -183,14 +193,15 @@ class TextureManager:
 
 def generate_mipmaps(image: bpy.types.Image, has_alpha: bool) -> list[bpy.types.Image]:
     mip_dim, _ = image.size
-    levels = []
+    levels: list[bpy.types.Image] = []
     level_idx = 0
     alpha_test = 0.75 # Value used by the game
+    pixels = cast(list[float], cast(Any, image).pixels)
 
     alpha_test_count = 0
     if has_alpha:
-        for px_idx in range(0, len(image.pixels), 4):
-            alpha = image.pixels[px_idx + 3]
+        for px_idx in range(0, len(pixels), 4):
+            alpha = pixels[px_idx + 3]
             if alpha > alpha_test:
                 alpha_test_count += 1
     orig_coverage = alpha_test_count / (mip_dim * mip_dim)
@@ -201,19 +212,20 @@ def generate_mipmaps(image: bpy.types.Image, has_alpha: bool) -> list[bpy.types.
         if mip_dim <= 2:
             break
         level = image.copy()
+        pixels = cast(list[float], cast(Any, level).pixels)
         level.scale(mip_dim, mip_dim)
         if has_alpha:
             alpha_threshold = orig_coverage * alpha_test * mip_dim
-            for px_idx in range(0, len(level.pixels), 4):
-                alpha = level.pixels[px_idx + 3]
+            for px_idx in range(0, len(pixels), 4):
+                alpha = pixels[px_idx + 3]
                 if alpha > alpha_threshold:
-                    level.pixels[px_idx + 3] = 1.0
+                    pixels[px_idx + 3] = 1.0
         levels.append(level)
     return levels
 
 
 def texture_checksum(tex: Texture) -> str:
-    data = list(tex.image.pixels)
+    data = cast(list[float], cast(Any, tex.image).pixels)
     data.append(float(tex.generate_mipmaps))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
 
@@ -235,16 +247,16 @@ def get_cached_xvr(path: str) -> Xvr:
     with open(path, "rb") as f:
         file_contents = f.read()
         (xvr, offset) = Xvr.deserialize_from(file_contents)
-        xvr.data = file_contents[offset:]
+        xvr.data = file_contents[offset:]  # pyright: ignore[reportAttributeAccessIssue]
     return xvr
 
 
 def cache_xvr(path: str, xvr: Xvr):
-    buf = ResizableBuffer(0)
-    xvr.serialize_into(buf)
+    buf = ResizableBuffer(size=0)
+    _ = xvr.serialize_into(buf)
     with open(path, "wb") as f:
         print("XVM Notice: Saving texture to cache '{}'".format(path))
-        f.write(buf.buffer)
+        _ = f.write(buf.buffer)
 
 
 def make_xvr(tex: Texture) -> Xvr:
@@ -257,24 +269,26 @@ def make_xvr(tex: Texture) -> Xvr:
             raise Exception("XVR Error in Image '{}': Image has unsupported alpha mode '{}'".format(tex.image.filepath, tex.image.alpha_mode))
         flags |= XvrFlags.ALPHA
     xvr_format = XvrFormat.DXT1
-    data = dxt.compress_image(list(tex.image.pixels), img_width, img_height, tex.image.channels, tex.has_alpha)
+    pixels = cast(list[float], cast(Any, tex.image).pixels)
+    data = dxt.compress_image(list(pixels), img_width, img_height, tex.image.channels, tex.has_alpha)
     if tex.generate_mipmaps:
         # Concat mipmaps into data
         mipmaps = generate_mipmaps(tex.image, tex.has_alpha)
         for level in mipmaps:
+            pixels = cast(list[float], cast(Any, level).pixels)
             level_width, level_height = level.size
-            data += dxt.compress_image(list(level.pixels), level_width, level_height, level.channels, tex.has_alpha)
+            data += dxt.compress_image(list(pixels), level_width, level_height, level.channels, tex.has_alpha)
             # Remove temporary copies because Blender automatically saves them in the scene
             bpy.data.images.remove(level)
     return Xvr(
-        body_size=len(data) + Xvr.type_size() - IffHeader.type_size(),
-        id=tex.id,
-        flags=flags,
-        format=xvr_format,
-        width=img_width,
-        height=img_height,
-        data_size=len(data),
-        data=data)
+        body_size=U32(len(data) + Xvr.type_size() - IffHeader.type_size()),
+        id=U32(tex.id),
+        flags=U32(flags),
+        format=U32(xvr_format),
+        width=U16(img_width),
+        height=U16(img_height),
+        data_size=U32(len(data)),
+        data=data)  # pyright: ignore[reportArgumentType]
 
 
 def write(path: str, textures: list[Texture]):
@@ -285,7 +299,7 @@ def write(path: str, textures: list[Texture]):
     # Index contains checksums of files
     cache_index_path = os.path.join(dirname, cache_dir, "index.json")
     cache_index = load_cache_index(cache_index_path)
-    xvrs = []
+    xvrs: list[Xvr] = []
     for tex in textures:
         (_, basename) = os.path.split(tex.name)
         cache_dir_path = os.path.join(dirname, cache_dir)
@@ -296,27 +310,27 @@ def write(path: str, textures: list[Texture]):
         checksum = texture_checksum(tex)
         if os.path.isfile(cached_xvr_path) and checksum == cache_index.get(xvr_basename):
             xvr = get_cached_xvr(cached_xvr_path)
-            xvr.id = tex.id # Use new texture id
+            xvr.id = U32(tex.id) # Use new texture id
         else:
             xvr = make_xvr(tex)
             cache_xvr(cached_xvr_path, xvr)
         cache_index[xvr_basename] = checksum
         save_cache_index(cache_index_path, cache_index)
         xvrs.append(xvr)
-    buf = ResizableBuffer(0)
+    buf = ResizableBuffer(size=0)
     # I'll just explicitly write the lists because it's easier
     xvm = Xvm(
-        body_size=Xvm.type_size() - IffHeader.type_size(),
-        xvr_count=len(xvrs))
-    xvm.serialize_into(buf)
+        body_size=U32(Xvm.type_size() - IffHeader.type_size()),
+        xvr_count=U32(len(xvrs)))
+    _ = xvm.serialize_into(buf)
     for xvr in xvrs:
         data = xvr.data
         xvr.data = []
-        xvr.serialize_into(buf)
-        buf.append(data)
+        _ = xvr.serialize_into(buf)
+        _ = buf.append(bytearray(data))
         buf.seek_to_end()
     with open(path, "wb") as f:
-        f.write(buf.buffer)
+        _ = f.write(buf.buffer)
 
 
 def read_rgb565_texture(src_buf: bytearray) -> list[float]:
@@ -363,22 +377,24 @@ def read(path: str) -> Xvm:
     (xvm, xvr_offset) = Xvm.deserialize_from(file_contents)
     for _ in range(xvm.xvr_count):
         (xvr, data_offset) = Xvr.deserialize_from(file_contents, xvr_offset)
-        xvr.data = file_contents[data_offset : data_offset + xvr.data_size]
+        compressed_data = bytearray(xvr.data)
+        pixels = file_contents[data_offset : data_offset + xvr.data_size]
         if xvr.format == XvrFormat.DXT1:
-            xvr.data = dxt.dxt1_decompress(xvr.data, xvr.width, xvr.height)
+            pixels = dxt.dxt1_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.DXT2 or xvr.format == XvrFormat.DXT3:
-            xvr.data = dxt.dxt3_decompress(xvr.data, xvr.width, xvr.height)
+            pixels = dxt.dxt3_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.DXT4 or xvr.format == XvrFormat.DXT5:
-            xvr.data = dxt.dxt5_decompress(xvr.data, xvr.width, xvr.height)
+            pixels = dxt.dxt5_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.R5G6B5:
-            xvr.data = read_rgb565_texture(xvr.data)
+            pixels = read_rgb565_texture(compressed_data)
         elif xvr.format == XvrFormat.A1R5G5B5:
-            xvr.data = read_argb1555_texture(xvr.data)
+            pixels = read_argb1555_texture(compressed_data)
         else:
             warnings.warn("Unsupported XVR format: {}".format(xvr.format))
-            xvr.data = []
+            pixels = bytearray()
+        xvr.data = pixels  # pyright: ignore[reportAttributeAccessIssue]
         xvm.xvrs.append(xvr)
         xvr_offset += xvr.body_size + IffHeader.type_size()
 
-    xvm._filename = os.path.basename(path)
+    xvm.set_filename(os.path.basename(path))
     return xvm

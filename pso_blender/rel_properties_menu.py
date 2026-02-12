@@ -1,9 +1,13 @@
+
+from collections.abc import Callable
+from typing import Any, cast, final, override
 import bpy
-from bpy.types import Panel
-from bpy.props import BoolProperty, IntProperty
+from bpy.types import Panel, Context
+from bpy.props import BoolProperty, IntProperty  # pyright: ignore[reportUnknownVariableType]
 from . import c_rel
 
 
+# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class MeshRelSettings(bpy.types.PropertyGroup):
     is_nrel: BoolProperty(name="N.REL")
     is_crel: BoolProperty(name="C.REL")
@@ -20,13 +24,17 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     is_stenciled: BoolProperty(name="Stenciled", description="Object will only be visible when rendered behind a stencil viewer", default=False)
 
 
-def make_bitfield_props(setting_name, name_map):
-    prop_keys = []
+class ObjectWithRelSettings(bpy.types.Object):
+    rel_settings: MeshRelSettings
 
-    def make_flag_getter(flag):
+
+def make_bitfield_props(setting_name: str, name_map: dict[int, str]) -> list[str]:
+    prop_keys: list[str] = []
+
+    def make_flag_getter(flag: int) -> Callable[[MeshRelSettings], bool]:
         return lambda settings: (getattr(settings, setting_name) & flag) != 0
 
-    def make_flag_setter(flag):
+    def make_flag_setter(flag: int) -> Callable[[MeshRelSettings, Any], None]:
         return lambda settings, value: (
                 setattr(settings, setting_name, getattr(settings, setting_name) | flag)
                 if value else
@@ -49,6 +57,7 @@ def make_bitfield_props(setting_name, name_map):
 COLLISION_FLAG_PROP_KEYS = make_bitfield_props("collision_flags_value1", c_rel.COLLISION_FLAG_TYPES)
 
 
+@final
 class MeshNrelSettingsPanel(Panel):
     bl_label = "N.REL"
     bl_idname = "OBJECT_PT_MeshNrelSettingsPanel"
@@ -59,25 +68,31 @@ class MeshNrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    def poll(self, context):
-        return context.object.type == "MESH"
+    @override
+    def poll(cls, context: Context):
+        return context.object is not None and context.object.type == "MESH"
 
-    def draw_header(self, context):
-        self.layout.prop(context.object.rel_settings, "is_nrel", text="")
+    @override
+    def draw_header(self, context: Context):
+        if context.object is not None and self.layout is not None:
+            self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_nrel", text="")
     
-    def draw(self, context):
-        self.layout.use_property_split = True
-        self.layout.use_property_decorate = False
-        settings = context.object.rel_settings
-        self.layout.active = settings.is_nrel
-        col = self.layout.column(align=True)
-        col.prop(settings, "receives_shadows")
-        col.prop(settings, "receives_fog")
-        col.prop(settings, "is_translucent")
-        col.prop(settings, "is_stencil_viewer")
-        col.prop(settings, "is_stenciled")
+    @override
+    def draw(self, context: Context):
+        if self.layout is not None and context.object is not None:
+            self.layout.use_property_split = True
+            self.layout.use_property_decorate = False
+            settings = cast(ObjectWithRelSettings, context.object).rel_settings
+            self.layout.active = cast(bool, settings.is_nrel)
+            col = self.layout.column(align=True)
+            col.prop(settings, "receives_shadows")
+            col.prop(settings, "receives_fog")
+            col.prop(settings, "is_translucent")
+            col.prop(settings, "is_stencil_viewer")
+            col.prop(settings, "is_stenciled")
 
 
+@final
 class MeshCrelSettingsPanel(Panel):
     bl_label = "C.REL"
     bl_idname = "OBJECT_PT_MeshCrelSettingsPanel"
@@ -88,23 +103,30 @@ class MeshCrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    def poll(self, context):
-        return context.object.type == "MESH"
+    @override
+    def poll(cls, context: Context):
+        return context.object is not None and context.object.type == "MESH"
 
-    def draw_header(self, context):
-        self.layout.prop(context.object.rel_settings, "is_crel", text="")
+    @override
+    def draw_header(self, context: Context):
+        if self.layout is not None:
+            self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_crel", text="")
     
-    def draw(self, context):
-        self.layout.use_property_split = True
-        self.layout.use_property_decorate = False
-        settings = context.object.rel_settings
-        self.layout.active = settings.is_crel
-        self.layout.row(align=True).label(text="Collision flags: " + hex(settings.collision_flags_value1 | (settings.collision_flags_value2 << 16)))
-        col = self.layout.column(heading="Collision type:", align=True)
-        for prop_key in COLLISION_FLAG_PROP_KEYS:
-            col.prop(settings, prop_key)
+    @override
+    def draw(self, context: Context):
+        if self.layout is not None and context.object is not None:
+            self.layout.use_property_split = True
+            self.layout.use_property_decorate = False
+            settings = cast(ObjectWithRelSettings, context.object).rel_settings
+            self.layout.active = cast(bool, settings.is_crel)
+            combined_collision_flag = cast(int, settings.collision_flags_value1) | (cast(int, settings.collision_flags_value2) << 16)
+            self.layout.row(align=True).label(text="Collision flags: " + hex(combined_collision_flag))
+            col = self.layout.column(heading="Collision type:", align=True)
+            for prop_key in COLLISION_FLAG_PROP_KEYS:
+                col.prop(settings, prop_key)
 
 
+@final
 class MeshRrelSettingsPanel(Panel):
     bl_label = "R.REL"
     bl_idname = "OBJECT_PT_MeshRrelSettingsPanel"
@@ -115,18 +137,24 @@ class MeshRrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    def poll(self, context):
-        return context.object.type == "MESH"
+    @override
+    def poll(cls, context: Context):
+        return context.object is not None and context.object.type == "MESH"
 
-    def draw_header(self, context):
-        self.layout.prop(context.object.rel_settings, "is_rrel", text="")
+    @override
+    def draw_header(self, context: Context):
+        if self.layout is not None:
+            self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_rrel", text="")
     
-    def draw(self, context):
-        settings = context.object.rel_settings
-        self.layout.active = settings.is_rrel
-        self.layout.label(text="Nothing here yet")
+    @override
+    def draw(self, context: Context):
+        if self.layout is not None and context.object is not None:
+            settings = cast(ObjectWithRelSettings, context.object).rel_settings
+            self.layout.active = cast(bool, settings.is_rrel)
+            self.layout.label(text="Nothing here yet")
 
 
+@final
 class MeshRelSettingsPanel(Panel):
     bl_label = "REL Settings"
     bl_idname = "OBJECT_PT_MeshRelSettingsPanel"
@@ -135,12 +163,15 @@ class MeshRelSettingsPanel(Panel):
     bl_context = "object"
 
     @classmethod
-    def poll(self, context):
-        return context.object.type == "MESH"
+    @override
+    def poll(cls, context: Context):
+        return context.object is not None and context.object.type == "MESH"
     
-    def draw(self, context):
-        self.layout.use_property_split = True
-        self.layout.use_property_decorate = False
-        settings = context.object.rel_settings
-        self.layout.prop(settings, "is_chunk")
-        self.layout.prop(settings, "always_rendered")
+    @override
+    def draw(self, context: Context):
+        if self.layout is not None and context.object is not None:
+            self.layout.use_property_split = True
+            self.layout.use_property_decorate = False
+            settings = cast(ObjectWithRelSettings, context.object).rel_settings
+            self.layout.prop(settings, "is_chunk")
+            self.layout.prop(settings, "always_rendered")

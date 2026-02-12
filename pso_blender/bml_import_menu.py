@@ -1,11 +1,14 @@
+from typing import cast, final, override
 import bpy, os
+from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ImportHelper
-from bpy.types import Operator
-from bpy.props import StringProperty
+from bpy.types import Context, Operator
+from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from . import bml, xvm
 
-
-class ImportBml(Operator, ImportHelper):
+# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
+@final
+class ImportBml(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMethodOverride]
     "Import BML"
 
 
@@ -24,13 +27,16 @@ class ImportBml(Operator, ImportHelper):
         options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH")
 
-    def execute(self, context):
+    @override
+    def execute(self, context: Context) -> set[OperatorReturnItems]:
         bml_path = None
         xvm_path = None
-        for f in self.files:
-            noext, ext = os.path.splitext(f.name)
+        selected_files = cast(bpy.types.OperatorFileListElement, self.files)
+        selected_files_dir = cast(str, self.directory)
+        for f in selected_files:
+            _noext, ext = os.path.splitext(f.name)
             ext = ext.lower()
-            filepath = os.path.join(self.directory, f.name)
+            filepath = os.path.join(selected_files_dir, f.name)
             if ext == ".bml":
                 if bml_path:
                     self.report({"ERROR"}, "Only one .bml may be imported at once")
@@ -44,9 +50,12 @@ class ImportBml(Operator, ImportHelper):
             else:
                 self.report({"ERROR"}, "Expected .bml or .xvm, was \"{}\"".format(ext))
                 return {"CANCELLED"}
-
+        if bml_path is None:
+            self.report({"ERROR"}, "No .bml selected")
+            return {"CANCELLED"}
         bml_xvm = xvm.read(xvm_path) if xvm_path else None
         collections = bml.read(bml_path, bml_xvm)
-        for coll in collections:
-            bpy.context.scene.collection.children.link(coll)
+        if bpy.context.scene is not None:
+            for coll in collections:
+                bpy.context.scene.collection.children.link(coll)
         return {"FINISHED"}

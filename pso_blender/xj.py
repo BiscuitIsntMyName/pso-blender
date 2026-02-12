@@ -1,5 +1,13 @@
+from collections.abc import Buffer
+from typing import cast, final, override
 import bpy, os, bmesh
 from dataclasses import dataclass, field
+
+from bpy.types import Collection, FloatColorAttribute, Material
+
+from pso_blender.njcm_node_properties_menu import ObjectWithNjcmSettings
+from pso_blender.rel_properties_menu import ObjectWithRelSettings
+from pso_blender.xj_material_properties_menu import MaterialWithXjSettings
 from .serialization import Serializable, Numeric, AlignedString
 from struct import unpack_from, pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
@@ -166,7 +174,8 @@ class VertexBufferContainer(Serializable):
     vertex_count: U32 = 0
 
     @classmethod
-    def deserialize_from(cls, buf, offset):
+    @override
+    def deserialize_from(cls, buf: Buffer, offset: int=0):
         (container, after) = super(VertexBufferContainer, cls).deserialize_from(buf, offset)
         vertex_format = container.vertex_format & 0xffff
         if vertex_format == 1:
@@ -190,6 +199,7 @@ class VertexBufferContainer(Serializable):
 
 
 @dataclass
+@final
 class BlendMode:
     # Not the actual d3d enum values, but indices into an array containing the enum values
     D3DBLEND_ZERO = 0
@@ -205,6 +215,7 @@ class BlendMode:
 
 
 @dataclass
+@final
 class TextureAddressingMode:
     D3DTADDRESS_WRAP = 3
     D3DTADDRESS_MIRROR = 4
@@ -214,6 +225,7 @@ class TextureAddressingMode:
 
 
 @dataclass
+@final
 class MaterialColorSource:
     D3DMCS_MATERIAL = 0
     D3DMCS_COLOR1 = 1
@@ -221,6 +233,7 @@ class MaterialColorSource:
 
 
 @dataclass
+@final
 class RenderStateType:
     BLEND_MODE = 2
     TEXTURE_ID = 3
@@ -248,11 +261,11 @@ class IndexBufferContainer(Serializable):
     vertex_buffer_index: U32 = 0
 
     @classmethod
-    def deserialize_from(cls, buf, offset):
+    @override
+    def deserialize_from(cls, buf: Buffer, offset: int=0):
         (container, after) = super(IndexBufferContainer, cls).deserialize_from(buf, offset)
         container.renderstate_args = RenderStateArgs.read_sequence(buf, container.renderstate_args, container.renderstate_args_count)
-        [endian, typecode] = Numeric.format_of_type(U16)
-        fmt = endian + str(container.index_count) + typecode
+        fmt = Numeric.format_of_type(U16, container.index_count)
         container.index_buffer = unpack_from(fmt, buf, offset=container.index_buffer)
         return (container, after)
 
@@ -268,7 +281,8 @@ class Mesh(Serializable):
     alpha_index_buffer_count: U32 = 0
 
     @classmethod
-    def deserialize_from(cls, buf, offset):
+    @override
+    def deserialize_from(cls, buf: Buffer, offset: int=0):
         (mesh, after) = super(Mesh, cls).deserialize_from(buf, offset=offset)
         mesh.vertex_buffers = VertexBufferContainer.read_sequence(buf, mesh.vertex_buffers, mesh.vertex_buffer_count)
         mesh.index_buffers = IndexBufferContainer.read_sequence(buf, mesh.index_buffers, mesh.index_buffer_count)
@@ -277,6 +291,7 @@ class Mesh(Serializable):
 
 
 @dataclass
+@final
 class NormalType:
     Vertex = 1
     Face = 2
@@ -334,17 +349,17 @@ def determine_vertex_format(has_textures: bool, has_vertex_colors: bool, use_nor
     return (vertex_format, vertex_size, vertex_buffer, vertex_ctor)
 
 
-def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: Mesh, has_textures: bool, vertex_colors, normal_type):
+def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: Mesh, has_textures: bool, vertex_colors: bpy.types.FloatColorAttribute | None, normal_type: int | None):
     use_normals = normal_type is not None
 
     # One vertex per loop
     # TODO: Should only use per-loop vertices when necessary
     (vertex_format, vertex_size, vertex_buffer, vertex_ctor) = determine_vertex_format(has_textures, bool(vertex_colors), use_normals)
 
-    if obj.rel_settings.is_translucent:
+    if cast(ObjectWithRelSettings, obj).rel_settings.is_translucent:
         vertex_format |= 0x10000
 
-    vertex_buffer.vertices = [None] * len(blender_mesh.loops)
+    vertex_buffer.vertices = [vertex_ctor()] * len(blender_mesh.loops)
     for face in blender_mesh.loop_triangles:
         for (vert_idx, loop_idx) in zip(face.vertices, face.loops):
             # Exclude translation from transform
@@ -354,57 +369,64 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             world_vert.w = 0
             world_vert = util.from_blender_axes((obj.matrix_world @ world_vert).to_3d())
             vertex = vertex_ctor(
-                x=world_vert[0],
-                y=world_vert[1],
-                z=world_vert[2])
+                x=F32(world_vert[0]),
+                y=F32(world_vert[1]),
+                z=F32(world_vert[2]))
             vertex_buffer.vertices[loop_idx] = vertex
             # Get UVs
             if has_textures:
                 u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
-                vertex.u = u
-                vertex.v = v
+                vertex.u = F32(u)
+                vertex.v = F32(v)
             # Get colors
             if vertex_colors:
                 if vertex_colors.domain == "POINT":
                     col = vertex_colors.data[vert_idx].color
                 elif vertex_colors.domain == "CORNER":
                     col = vertex_colors.data[loop_idx].color
+                else:
+                    raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 # BGRA
                 # Need to clamp because light baking can cause values to go higher than normal
-                vertex.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
-                vertex.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
-                vertex.r = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
-                vertex.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
+                vertex.b = U8(int(util.clamp(col[0], 0.0, 1.0) * 0xff))
+                vertex.g = U8(int(util.clamp(col[1], 0.0, 1.0) * 0xff))
+                vertex.r = U8(int(util.clamp(col[2], 0.0, 1.0) * 0xff))
+                vertex.a = U8(int(util.clamp(col[3], 0.0, 1.0) * 0xff))
             if use_normals:
                 # Vertex or face normal
                 normal = local_vert.normal if normal_type == NormalType.Vertex else face.normal
                 normal = normal.to_4d()
                 normal.w = 0
                 normal = util.from_blender_axes((obj.matrix_world @ normal).to_3d().normalized())
-                vertex.nx = normal[0]
-                vertex.ny = normal[1]
-                vertex.nz = normal[2]
+                vertex.nx = F32(normal[0])
+                vertex.ny = F32(normal[1])
+                vertex.nz = F32(normal[2])
 
     # Put all vertices in one buffer
-    xj_mesh.vertex_buffer_count = 1
-    xj_mesh.vertex_buffers = destination.write(VertexBufferContainer(
-        vertex_format=vertex_format,
-        vertex_buffer=destination.write(vertex_buffer),
-        vertex_size=vertex_size,
-        vertex_count=len(vertex_buffer.vertices)))
+    xj_mesh.vertex_buffer_count = U32(1)
+    xj_mesh.vertex_buffers = Ptr32(destination.write(VertexBufferContainer(
+        vertex_format=U32(vertex_format),
+        vertex_buffer=Ptr32(destination.write(vertex_buffer)),
+        vertex_size=U32(vertex_size),
+        vertex_count=U32(len(vertex_buffer.vertices)))))
 
 
 class MaterialStrips:
-    def __init__(self, material_index: int, material: bpy.types.Material, strips: list[list[int]]):
+    material_index: int
+    renderstate_args: list[RenderStateArgs]
+    strips: list[list[int]]
+
+    def __init__(self, material_index: int, material: bpy.types.Material | None, strips: list[list[int]]):
         self.material_index = material_index
         if material:
+            xj_settings = cast(MaterialWithXjSettings, material).xj_settings
             self.renderstate_args = make_renderstate_args(
-                blend_modes=(material.xj_settings.src_blend, material.xj_settings.dst_blend),
-                texture_addressing=(material.xj_settings.tex_addr_u, material.xj_settings.tex_addr_v),
-                lighting=material.xj_settings.lighting,
-                material=(material.xj_settings.material1, material.xj_settings.material2),
-                camera_space_normals=material.xj_settings.camera_space_normals,
-                diffuse_color_source=material.xj_settings.diffuse_color_source)
+                blend_modes=(xj_settings.src_blend, xj_settings.dst_blend),
+                texture_addressing=(xj_settings.tex_addr_u, xj_settings.tex_addr_v),
+                lighting=xj_settings.lighting,
+                material=(xj_settings.material1, xj_settings.material2),
+                camera_space_normals=xj_settings.camera_space_normals,
+                diffuse_color_source=xj_settings.diffuse_color_source)
         else:
             # Empty slot
             self.renderstate_args = []
@@ -412,24 +434,24 @@ class MaterialStrips:
 
 
 def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> list[MaterialStrips]:
-    material_strips = []
+    material_strips: list[MaterialStrips] = []
     if texture_man.object_has_textures(obj):
-        material_faces = []
+        material_faces: list[list[tuple[int, int, int]]] = []
         # Get all faces grouped by their material, then stripify them
         for (mat_idx, mat_slot) in enumerate(obj.material_slots):
             material_faces.append([])
             material_strips.append(MaterialStrips(mat_idx, mat_slot.material, []))
         for face in blender_mesh.loop_triangles:
-            material_faces[face.material_index].append(tuple(face.loops))
+            material_faces[face.material_index].append((face.loops[0], face.loops[1], face.loops[2]))
         for mat_idx in range(len(obj.material_slots)):
             if len(material_faces[mat_idx]) > 0:
-                strips = tristrip.stripify(material_faces[mat_idx], stitchstrips=True)
+                strips = cast(list[list[int]], tristrip.stripify(material_faces[mat_idx], stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
                 material_strips[mat_idx].strips = strips
     else:
-        faces = []
+        faces: list[tuple[int, int, int]] = []
         for face in blender_mesh.loop_triangles:
-            faces.append(tuple(face.loops))
-        strips = tristrip.stripify(faces, stitchstrips=True)
+            faces.append((face.loops[0], face.loops[1], face.loops[2]))
+        strips = cast(list[list[int]], tristrip.stripify(faces, stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
         material_strips.append(MaterialStrips(-1, None, strips))
     return material_strips
 
@@ -438,8 +460,8 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
     # Texture IDs must be 0-based for the render settings
     # One buffer per strip
     material_strips = create_tristrips_grouped_by_material(obj, blender_mesh, texture_man)
-    opaque_index_buffer_containers = []
-    alpha_index_buffer_containers = []
+    opaque_index_buffer_containers: list[IndexBufferContainer] = []
+    alpha_index_buffer_containers: list[IndexBufferContainer] = []
     textures = texture_man.get_object_textures(obj)
     texture_id_base = texture_man.get_base_id()
     for material_strip_data in material_strips:
@@ -447,7 +469,7 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             # Strips can be empty due to unused material slots, skip them
             if len(strip) < 1:
                 continue
-            has_alpha = obj.rel_settings.is_translucent or has_vertex_alpha
+            has_alpha = cast(bool, cast(ObjectWithRelSettings, obj).rel_settings.is_translucent) or has_vertex_alpha
             # Create render state args
             first_rs_arg_ptr = NULLPTR
             rs_args = material_strip_data.renderstate_args
@@ -464,12 +486,15 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
                     first_rs_arg_ptr = ptr
             # Write Indices
             buf_ptr = destination.write(IndexBuffer(indices=strip), True)
-            containers = alpha_index_buffer_containers if has_alpha else opaque_index_buffer_containers
-            containers.append(IndexBufferContainer(
+            container = IndexBufferContainer(
                 index_buffer=buf_ptr,
                 index_count=len(strip),
                 renderstate_args=first_rs_arg_ptr,
-                renderstate_args_count=rs_arg_count))
+                renderstate_args_count=rs_arg_count)
+            if has_alpha:
+                alpha_index_buffer_containers.append(container)
+            else:
+                opaque_index_buffer_containers.append(container)
     # Index buffer containers need to be written back to back
     first_alpha_index_buffer_container_ptr = NULLPTR
     for buf in alpha_index_buffer_containers:
@@ -499,25 +524,27 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
             # Empty slot
             continue
         # Lighting requires normals
-        if mat_slot.material.xj_settings.lighting or mat_slot.material.xj_settings.camera_space_normals:
-            if not mat_slot.material.xj_settings.normal_type:
-                mat_slot.material.xj_settings.normal_type = str(NormalType.Vertex)
+        xj_settings = cast(MaterialWithXjSettings, mat_slot.material).xj_settings
+        if xj_settings.lighting or xj_settings.camera_space_normals:
+            if not xj_settings.normal_type:
+                xj_settings.normal_type = str(NormalType.Vertex)
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
-            normal_type = int(mat_slot.material.xj_settings.normal_type)
+            normal_type = int(xj_settings.normal_type)
             break
-    
+
+    vertex_colors: FloatColorAttribute | None = None
     if len(blender_mesh.color_attributes) > 0:
-        vertex_colors = blender_mesh.color_attributes[0]
+        vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes[0])
     elif normal_type is not None:
         # Effects that need normals usually also need vcol. Let's add a blank white color attribute.
-        vertex_colors = blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "CORNER")
+        vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "CORNER"))
         for attr in vertex_colors.data:
             attr.color[0] = 1
             attr.color[1] = 1
             attr.color[2] = 1
     else:
         vertex_colors = None
-    has_vertex_color = bool(vertex_colors)
+    has_vertex_color = vertex_colors is not None
     has_vertex_alpha = False
     if has_vertex_color:
         # Despite the names of the types, they appear to be identical
@@ -536,16 +563,16 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
 
 
 def make_renderstate_args(
-    *args,
-    texture_id=None,
-    texture_addressing=None,
-    blend_modes=None,
-    lighting=None,
-    material=None,
-    camera_space_normals=None,
-    diffuse_color_source=None
+    *,
+    texture_id: int | None=None,
+    texture_addressing: tuple[int, int] | None=None,
+    blend_modes: tuple[int, int] | None=None,
+    lighting: bool | None=None,
+    material: tuple[int, int] | None=None,
+    camera_space_normals: bool | None=None,
+    diffuse_color_source: int | None=None
 ) -> list[RenderStateArgs]:
-    rs_args = []
+    rs_args: list[RenderStateArgs] = []
     if texture_id is not None:
         rs_args.append(RenderStateArgs(
             state_type=RenderStateType.TEXTURE_ID,
@@ -580,7 +607,7 @@ def make_renderstate_args(
     return rs_args
 
 
-def make_material(name: str, material_settings: RenderStateArgs, node_id: int, material_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Material:
+def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None) -> Material:
     mat = bpy.data.materials.new("{}_node_{}_mat_{}".format(name, node_id, material_id))
     mat.use_nodes = True
     if mat.node_tree:
@@ -590,14 +617,15 @@ def make_material(name: str, material_settings: RenderStateArgs, node_id: int, m
     tex_id = None
 
     # Parse xj material settings
-    mat.xj_settings.lighting = False
+    xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
+    xj_settings.lighting = False
     for setting in material_settings:
         t = setting.state_type
         arg1 = setting.arg1
         arg2 = setting.arg2
         if t == RenderStateType.BLEND_MODE:
-            mat.xj_settings.src_blend = str(arg1)
-            mat.xj_settings.dst_blend = str(arg2)
+            xj_settings.src_blend = str(arg1)
+            xj_settings.dst_blend = str(arg2)
         elif t == RenderStateType.TEXTURE_ID:
             tex_id = arg1
         elif t == RenderStateType.TEXTURE_ADDRESSING:
@@ -612,24 +640,24 @@ def make_material(name: str, material_settings: RenderStateArgs, node_id: int, m
                 TextureAddressingMode.D3DTADDRESS_CLAMP,
                 TextureAddressingMode.D3DTADDRESS_BORDER,
                 TextureAddressingMode.D3DTADDRESS_MIRRORONCE]
-            mat.xj_settings.tex_addr_u = str(modes[arg1])
-            mat.xj_settings.tex_addr_v = str(modes[arg2])
+            xj_settings.tex_addr_u = str(modes[arg1])
+            xj_settings.tex_addr_v = str(modes[arg2])
         elif t == RenderStateType.MATERIAL:
-            mat.xj_settings.material1 = arg1
-            mat.xj_settings.material2 = arg2
+            xj_settings.material1 = arg1
+            xj_settings.material2 = arg2
         elif t == RenderStateType.LIGHTING:
-            mat.xj_settings.lighting = bool(arg1)
+            xj_settings.lighting = bool(arg1)
         elif t == RenderStateType.CAMERA_SPACE_NORMALS:
-            mat.xj_settings.camera_space_normals = bool(arg1)
+            xj_settings.camera_space_normals = bool(arg1)
         elif t == RenderStateType.MATERIAL_SOURCE:
-            mat.xj_settings.diffuse_color_source = str(arg1)
+            xj_settings.diffuse_color_source = str(arg1)
     
     if tex_id is None or xj_xvm is None:
         img = None
     else:
         # Find old or create new image from xvr
         xvr = xj_xvm.xvrs[tex_id]
-        img_name = "{}_xvr_{}".format(xj_xvm._filename, tex_id)
+        img_name = "{}_xvr_{}".format(xj_xvm.get_filename(), tex_id)
         img_idx = bpy.data.images.find(img_name)
         if img_idx == -1:
             img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
@@ -647,44 +675,47 @@ def make_material(name: str, material_settings: RenderStateArgs, node_id: int, m
         if len(xvr.data) > 0:
             img.pixels = xvr.data
 
-    # Link texture and vcol as inputs with a mix node
-    output_node = mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial")
-    bsdf_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfDiffuse")
-    transparency_node = mat.node_tree.nodes.new(type="ShaderNodeBsdfTransparent")
-    shader_mix_node = mat.node_tree.nodes.new(type="ShaderNodeMixShader")
+    if mat.node_tree is None:
+        raise Exception("XJ error in object '{}': Material has no node tree".format(name))
 
-    vcol_node = mat.node_tree.nodes.new(type="ShaderNodeVertexColor")
+    # Link texture and vcol as inputs with a mix node
+    output_node = cast(bpy.types.ShaderNodeOutputMaterial, mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial"))
+    bsdf_node = cast(bpy.types.ShaderNodeBsdfDiffuse, mat.node_tree.nodes.new(type="ShaderNodeBsdfDiffuse"))
+    transparency_node = cast(bpy.types.ShaderNodeBsdfTransparent, mat.node_tree.nodes.new(type="ShaderNodeBsdfTransparent"))
+    shader_mix_node = cast(bpy.types.ShaderNodeMixShader, mat.node_tree.nodes.new(type="ShaderNodeMixShader"))
+
+    vcol_node = cast(bpy.types.ShaderNodeVertexColor, mat.node_tree.nodes.new(type="ShaderNodeVertexColor"))
     vcol_node.layer_name = "vertex_color"
 
-    mix_node = mat.node_tree.nodes.new(type="ShaderNodeMix")
+    mix_node = cast(bpy.types.ShaderNodeMix, mat.node_tree.nodes.new(type="ShaderNodeMix"))
     mix_node.data_type = "RGBA"
     mix_node.blend_type = "MULTIPLY"
-    mix_node.inputs[0].default_value = 1.0
+    cast(bpy.types.NodeSocketFloat, mix_node.inputs[0]).default_value = 1.0
 
     if img is None:
         tex_node = None
     else:
-        tex_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
+        tex_node = cast(bpy.types.ShaderNodeTexImage, mat.node_tree.nodes.new(type="ShaderNodeTexImage"))
         tex_node.image = img
         tex_node.extension = "MIRROR"
 
-    mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
-    mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
+    _ = mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
+    _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
     if tex_node is not None:
-        mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
-        mat.node_tree.links.new(tex_node.outputs[1], shader_mix_node.inputs[0])
-    mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
-    mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
-    mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])
+        _ = mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
+        _ = mat.node_tree.links.new(tex_node.outputs[1], shader_mix_node.inputs[0])
+    _ = mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
+    _ = mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
+    _ = mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])
 
     return mat
 
 
-def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm: xvm.Xvm) -> bpy.types.Object:
+def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
     # Group index buffers by their vertex buffer
-    grouped_alpha_index_buffers = {}
+    grouped_alpha_index_buffers: dict[int, list[IndexBufferContainer]] = {}
     for index_buffer in node.mesh.alpha_index_buffers:
         if index_buffer.vertex_buffer_index in grouped_alpha_index_buffers:
             grouped_alpha_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
@@ -699,13 +730,13 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
             grouped_opaque_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
     
     grouped_index_buffers = list(grouped_alpha_index_buffers.items()) + list(grouped_opaque_index_buffers.items())
-    all_index_buffers = node.mesh.alpha_index_buffers + node.mesh.index_buffers
+    all_index_buffers: list[IndexBufferContainer] = node.mesh.alpha_index_buffers + node.mesh.index_buffers
 
     # Create one material for each index buffer
-    index_buffer_materials = {}
+    index_buffer_materials: dict[int, tuple[int, Material]] = {}
     # Sometimes a mesh assumes that it shares a material setting with the previously rendered mesh and omits that setting from its own settings.
     # To replicate this we need to create a settings object that is the accumulation of all the previous settings.
-    accumulated_material_settings = []
+    accumulated_material_settings: list[RenderStateArgs] = []
     for i, index_buffer in enumerate(all_index_buffers):
         for setting in index_buffer.renderstate_args:
             found = False
@@ -718,20 +749,20 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
             if not found:
                 accumulated_material_settings.append(setting)
         mat = make_material(name, accumulated_material_settings, node_id, i, xj_xvm)
-        index_buffer_materials[index_buffer._offset] = (i, mat)
+        index_buffer_materials[index_buffer.get_offset()] = (i, mat)
 
     # Get the attributes of each vertex buffer
-    vertex_sets = []
-    normal_sets = []
-    uv_sets = []
-    color_sets = []
+    vertex_sets: list[list[tuple[float, float, float]]] = []
+    normal_sets: list[list[tuple[float, float, float]]] = []
+    uv_sets: list[list[tuple[float, float]]] = []
+    color_sets: list[list[tuple[int, int, int]]] = []
 
     has_translucent_flag = False
     for vertex_buffer in node.mesh.vertex_buffers:
-        vertices = []
-        colors = []
-        normals = []
-        uvs = []
+        vertices: list[tuple[float, float, float]] = []
+        colors: list[tuple[int, int, int]] = []
+        normals: list[tuple[float, float, float]] = []
+        uvs: list[tuple[float, float]] = []
         has_color = vertex_has_color(vertex_buffer.vertex_format)
         has_normals = vertex_has_normals(vertex_buffer.vertex_format)
         has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
@@ -760,7 +791,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         normals = normal_sets[vertex_buffer_index]
         uvs = uv_sets[vertex_buffer_index]
 
-        faces = []
+        faces: list[tuple[int, int, int]] = []
 
         for index_buffer in index_buffers:
             indices = index_buffer.index_buffer
@@ -790,7 +821,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         for index_buffer in index_buffers:
             indices = index_buffer.index_buffer
             # Assume mat slot index will hopefully match when we actually add the material later
-            (mat_slot_idx, mat) = index_buffer_materials[index_buffer._offset]
+            (mat_slot_idx, mat) = index_buffer_materials[index_buffer.get_offset()]
             for poly in blender_mesh.polygons:
                 if all(i in indices for i in poly.vertices):
                     poly.material_index = mat_slot_idx
@@ -809,7 +840,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
             blender_mesh.normals_split_custom_set_from_vertices(normals)
 
         # Add vertex colors
-        color_attribute = blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
+        color_attribute = cast(FloatColorAttribute, blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT"))
         if len(colors) > 0:
             for i in range(len(colors)):
                 color_attribute.data[i].color[0] = colors[i][0] / 0xff
@@ -825,7 +856,8 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
     obj = bpy.data.objects.new(obj_name, combined_mesh)
-    obj.rel_settings.is_translucent = has_translucent_flag
+    rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+    rel_settings.is_translucent = has_translucent_flag
     # Apply transforms
     scale = (1.0 / world_scale, 1.0 / world_scale, 1.0 / world_scale)
     if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
@@ -844,13 +876,13 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         indices = index_buffer.index_buffer
         vertex_group = obj.vertex_groups.new(name="{}_node_{}_ib_{}".format(name, node_id, i))
         vertex_group.add(indices, 1.0, "ADD")
-        (_, mat) = index_buffer_materials[index_buffer._offset]
-        obj.data.materials.append(mat)
+        (_, mat) = index_buffer_materials[index_buffer.get_offset()]
+        cast(bpy.types.Mesh, obj.data).materials.append(mat)
     
     return obj
 
 
-def xj_to_blender_mesh(name: str, node: MeshTreeNode, xvm: xvm.Xvm) -> bpy.types.Collection:
+def xj_to_blender_mesh(name: str, root_node: MeshTreeNode, xvm: xvm.Xvm | None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
 
     world_scale = util.get_pso_world_scale()
@@ -858,7 +890,7 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, xvm: xvm.Xvm) -> bpy.types
     # Iterate tree and create a blender object for each node
     # Nodes with meshes are turned into mesh objects and empty nodes into empty objects
     # Hierarchy is maintained with blender's parenting system
-    tree_stack = [(node, None)] # (current_node, current_parent_object)
+    tree_stack: list[tuple[MeshTreeNode, bpy.types.Object | None]] = [(root_node, None)] # (current_node, current_parent_object)
     while len(tree_stack) > 0:
         (node, parent_object) = tree_stack.pop()
 
@@ -878,10 +910,10 @@ def xj_to_blender_mesh(name: str, node: MeshTreeNode, xvm: xvm.Xvm) -> bpy.types
                 obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
         else:
             obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
-            obj["mesh_offset"] = hex(node.mesh._offset)
+            obj["mesh_offset"] = hex(node.mesh.get_offset())
         
-        obj.njcm_settings.eval_flags = set(str(x) for x in util.get_set_bits(node.eval_flags))
-        obj["node_offset"] = hex(node._offset)
+        cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(str(x) for x in util.get_set_bits(node.eval_flags))
+        obj["node_offset"] = hex(node.get_offset())
 
         collection.objects.link(obj)
 
@@ -911,7 +943,7 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
 
         # Transform eval flags from blender format into actual bitfield
         eval_flags = 0
-        for x in obj.njcm_settings.eval_flags:
+        for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
             eval_flags |= int(x)
 
         mesh_node = MeshTreeNode(
@@ -921,9 +953,9 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
             scale_z=1.0)
         
         if not has_mesh:
-            mesh_node.x = obj.location[0] * world_scale
-            mesh_node.y = obj.location[2] * world_scale
-            mesh_node.z = -obj.location[1] * world_scale
+            mesh_node.x = F32(obj.location[0] * world_scale)
+            mesh_node.y = F32(obj.location[2] * world_scale)
+            mesh_node.z = F32(-obj.location[1] * world_scale)
 
         # Pointers will be overwritten later but we need to mark them as non-null or they won't be saved in the POF0 table
         if has_mesh:
@@ -958,7 +990,7 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
         if has_children:
             # Write children into chunk and child pointer into node
             child_pointer_offset = IffHeader.type_size() + node_ptr + MeshTreeNode.offset_of("child")
-            child_ptr = make_mesh_tree(njcm_chunk, obj.children, texture_man)
+            child_ptr = make_mesh_tree(njcm_chunk, list(obj.children), texture_man)
             pack_into(Numeric.endianness_prefix + "L", njcm_chunk.buf.buffer, child_pointer_offset, child_ptr)
 
     return first_node_ptr
@@ -993,7 +1025,7 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
     for obj in root_objs:
         # Write root nodes as one chunk each
         njcm_chunk = IffChunk("NJCM")
-        make_mesh_tree(njcm_chunk, [obj], texture_man)
+        _ = make_mesh_tree(njcm_chunk, [obj], texture_man)
         xj_buf += njcm_chunk.finish()
 
     return xj_buf
@@ -1006,14 +1038,14 @@ def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
     xj_buf = make_xj(root_objs, texture_man)
 
     with open(xj_path, "wb") as f:
-        f.write(xj_buf)
+        _ = f.write(xj_buf)
 
     if xvm_path and texture_man.has_textures():
         xvm.write(xvm_path, texture_man.get_all_textures())
 
-def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
+def read(xj_path: str, xj_xvm: xvm.Xvm | None) -> list[Collection]:
     filename = os.path.basename(xj_path)
-    collections = []
+    collections: list[Collection] = []
     chunk_header_size = IffHeader.type_size()
 
     with open(xj_path, "rb") as f:
@@ -1022,7 +1054,6 @@ def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
     # Read iff chunks
     chunk_offset = 0
     prev_chunk_offset = None
-    prev_chunk_size = None
     need_pof0 = False
     while chunk_offset < len(file_contents):
         (chunk_header, _) = IffHeader.deserialize_from(file_contents, offset=chunk_offset)
@@ -1030,15 +1061,16 @@ def read(xj_path: str, xj_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
         if chunk_type == "NJCM":
             need_pof0 = True
         elif chunk_type == "POF0":
+            if prev_chunk_offset is None:
+                raise Exception("XJ error in file '{}': Encountered POF0 but there was no previous chunk".format(filename))
             if need_pof0:
                 # Could maybe check if pointers to 0 are valid?
-                _ = parse_pof0(filename, file_contents, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
+                _ = parse_pof0(filename, file_contents, prev_chunk_offset, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
                 (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
                 models = xj_to_blender_mesh(filename, root_node, xj_xvm)
                 collections.append(models)
                 need_pof0 = False
         prev_chunk_offset = chunk_offset
-        prev_chunk_size = chunk_header.body_size
         chunk_offset += chunk_header.body_size + chunk_header_size
     return collections

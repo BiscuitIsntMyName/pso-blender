@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import cast
 import bpy.types
 from .rel import Rel
 from .serialization import Serializable, Numeric
@@ -56,7 +57,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
     rel = Rel()
     minimap = Minimap()
     minimap.room_count = len(room_objects)
-    rooms = []
+    rooms: list[Room] = []
     for (i, obj) in enumerate(room_objects):
         blender_mesh = obj.to_mesh()
 
@@ -69,17 +70,17 @@ def write(path: str, room_objects: list[bpy.types.Object]):
             z=geom_center[2])
 
         faces = util.mesh_faces(blender_mesh)
-        vertices = []
+        vertices: list[Vertex] = []
         farthest_sq = float("-inf")
         for local_vert in blender_mesh.vertices:
             # Apply transforms from object but translate position back to local
             world_vert = util.from_blender_axes(obj.matrix_world @ local_vert.co) * util.get_pso_world_scale() - geom_center
-            farthest_sq = max(farthest_sq, util.distance_squared(geom_center, world_vert))
+            farthest_sq = max(farthest_sq, util.distance_squared(geom_center.to_tuple(), world_vert.to_tuple()))
             vertices.append(Vertex(
                 x=world_vert[0], y=world_vert[1], z=world_vert[2],
                 nx=0.0, ny=1.0, nz=0.0))
         room.discovery_radius = math.sqrt(farthest_sq)
-        strips = tristrip.stripify(faces, stitchstrips=True)
+        strips = cast(list[list[int]], tristrip.stripify(faces, stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
 
         container = MeshContainer()
         mesh = Mesh(
@@ -93,10 +94,10 @@ def write(path: str, room_objects: list[bpy.types.Object]):
             vertex_count=len(vertices),
             vertices=vertices)
         vertex_node_ptr = rel.write(vertex_node)
-        rel.write(VertexListNode(flags=0xff)) # Terminator
+        _ = rel.write(VertexListNode(flags=0xff)) # Terminator
 
         # Indices
-        indices = []
+        indices: list[IndexArray] = []
         indices_size = 0
         for strip in strips:
             indices.append(IndexArray(length=len(strip), indices=strip))
@@ -118,9 +119,9 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         index_node_ptr = rel.write(index_node)
 
         if padding:
-            rel.buf.pack(padding, 0)
+            _ = rel.buf.pack(padding, 0)
 
-        rel.write(IndexListNode(flags=0xff)) # Terminator
+        _ = rel.write(IndexListNode(flags=0xff)) # Terminator
 
         mesh.vertex_list = vertex_node_ptr
         mesh.index_list = index_node_ptr
@@ -139,8 +140,9 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         room_ptr = rel.write(room)
         if first_room_ptr is None:
             first_room_ptr = room_ptr
-    minimap.rooms = first_room_ptr
+    if first_room_ptr is not None:
+        minimap.rooms = first_room_ptr
     minimap_ptr = rel.write(minimap)
     file_contents = rel.finish(minimap_ptr)
     with open(path, "wb") as f:
-        f.write(file_contents)
+        _ = f.write(file_contents)

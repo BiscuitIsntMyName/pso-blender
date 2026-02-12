@@ -1,7 +1,10 @@
+from typing import final
 import bpy
 from warnings import warn
 from struct import pack_into
 from dataclasses import dataclass
+
+from mathutils import Vector
 from .serialization import Serializable, Numeric
 from .iff import IffHeader, IffChunk
 from . import util
@@ -45,6 +48,7 @@ class MData3(Serializable):
 
 
 @dataclass
+@final
 class MotionFlag:
     NJD_MTYPE_POS_0         = 1 << 0
     NJD_MTYPE_ANG_1         = 1 << 1
@@ -72,13 +76,17 @@ class Motion(Serializable):
 
 def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearray:
     """Returns finished IffChunk"""
+    if bpy.context.scene is None:
+        raise Exception("NJCM error: Blender has no scene")
     for obj in bpy.data.objects:
         if obj.type == "ARMATURE":
             armature = obj
             break
     else:
-        raise Exception("NJM: No armature")
+        raise Exception("NJM error: Object has no armature")
     orig_frame = bpy.context.scene.frame_current
+    if armature.animation_data is None:
+        raise Exception("NJM error: Armature has no animation data")
     orig_action = armature.animation_data.action
     armature.animation_data.action = action
     # Check what kind of transforms animation contains
@@ -103,12 +111,12 @@ def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearra
         factor_count=3)
     # Write this pointer later
     nodes_to_keyframes_ptr_offset = nmdm_chunk.write(motion) + IffHeader.type_size() + 0
-    mdatas = []
+    mdatas: list[MData3] = []
     # Iterate model nodes
     for obj in objs:
-        translations = []
-        rotations = []
-        scalings = []
+        translations: list[Vector] = []
+        rotations: list[Vector] = []
+        scalings: list[Vector] = []
         # Play animation in scene to have blender automatically apply animation transforms to object
         for frame_num in range(int(action.frame_range[0]), int(action.frame_range[1] + 1)):
             bpy.context.scene.frame_set(frame_num)

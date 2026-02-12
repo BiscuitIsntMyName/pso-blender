@@ -1,7 +1,8 @@
 import functools, multiprocessing, struct
+from typing import cast
 
 
-RGB = tuple[int, int, int]
+type RGB = tuple[int, int, int]
 
 
 def rgb8_to_rgb565(rgb: RGB) -> int:
@@ -20,7 +21,7 @@ def dxt_get_block_bounds(
         x: int, y: int,
         img_width: int, block_dim: int,
         src_channels: int
-    ):
+    ) -> tuple[RGB, RGB]:
     dst_channels = 3
     min_values = [0xff] * dst_channels
     max_values = [0] * dst_channels
@@ -33,30 +34,31 @@ def dxt_get_block_bounds(
                     max_values[chan] = val
                 if min_values[chan] > val:
                     min_values[chan] = val
-    return (min_values, max_values)
+    return (cast(RGB, tuple(min_values)), cast(RGB, tuple(max_values)))
 
 
 def dxt_quantize(min_rgb: RGB, max_rgb: RGB) -> tuple[int, int]:
     inset = tuple(map(lambda a, b: (a - b) >> 4, max_rgb, min_rgb))
-    max_rgb565 = rgb8_to_rgb565(tuple(map(lambda a, b: a - b if a >= b else 0, max_rgb, inset)))
-    min_rgb565 = rgb8_to_rgb565(tuple(map(lambda a, b: a + b if a + b < 0xff else 0xff, min_rgb, inset)))
+    max_rgb565 = rgb8_to_rgb565(cast(RGB, tuple(map(lambda a, b: a - b if a >= b else 0, max_rgb, inset))))
+    min_rgb565 = rgb8_to_rgb565(cast(RGB, tuple(map(lambda a, b: a + b if a + b < 0xff else 0xff, min_rgb, inset))))
     return (min_rgb565, max_rgb565)
 
 
-def dxt_make_color_palette(color0: int, color1: int) -> list[RGB]:
+def dxt_make_color_palette(color0: int, color1: int) -> tuple[RGB, RGB, RGB, RGB]:
     palette0 = decompose_rgb565(color0)
     palette1 = decompose_rgb565(color1)
     if color0 <= color1:
-        palette2 = tuple(map(lambda a, b: (a + b) // 2, palette0, palette1))
-        palette3 = (0, 0, 0, 0)
+        palette2 = cast(RGB, tuple(map(lambda a, b: (a + b) // 2, palette0, palette1)))
+        palette3 = (0, 0, 0)
     else:
-        palette2 = tuple(map(lambda a, b: (((a << 1) + b) // 3) | 0, palette0, palette1))
-        palette3 = tuple(map(lambda a, b: (((b << 1) + a) // 3) | 0, palette0, palette1))
-    return [palette0, palette1, palette2, palette3]
+        palette2 = cast(RGB, tuple(map(lambda a, b: (((a << 1) + b) // 3) | 0, palette0, palette1)))
+        palette3 = cast(RGB, tuple(map(lambda a, b: (((b << 1) + a) // 3) | 0, palette0, palette1)))
+    return (palette0, palette1, palette2, palette3)
 
 
 def dxt1_palettize_block(
-        pixels: list[float], palette: list[list[int]],
+        pixels: list[float],
+        palette: tuple[RGB, RGB, RGB],
         x: int, y: int,
         img_width: int, block_dim: int,
         src_channels: int,
@@ -128,7 +130,7 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
         raise Exception("XVR error: Image dimensions must be multiples of {}".format(DXT_BLOCK_DIM))
     dst_buf = bytearray(img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM) * DXT1_BLOCK_SZ)
     # Create work
-    block_coords = []
+    block_coords: list[tuple[int, int]] = []
     for y in range(0, img_height, DXT_BLOCK_DIM):
         for x in range(0, img_width, DXT_BLOCK_DIM):
             block_coords.append((x, y))
@@ -144,11 +146,11 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
     return dst_buf
 
 
-def decode_dxt_colors(src_buf: bytearray, src_offset: int, block_idx: int, img_width: int, img_height: int, dst_buf: list[float], dst_chans: int, is_dxt1: bool):
+def decode_dxt_colors(src_buf: bytearray, src_offset: int, block_idx: int, img_width: int, _img_height: int, dst_buf: list[float], dst_chans: int, is_dxt1: bool):
     palette_ratios_no_alpha = [1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0]
     palette_ratios_with_alpha = [1.0, 0.0, 0.5]
 
-    (color0, color1, color_indices) = struct.unpack_from("<HHL", src_buf, src_offset)
+    (color0, color1, color_indices) = cast(tuple[int, int, int], struct.unpack_from("<HHL", src_buf, src_offset))
 
     # Color order indicates if color3 is 1bit alpha
     palette_with_alpha = is_dxt1 and color0 <= color1
@@ -275,7 +277,7 @@ def dxt5_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list
                 elif alpha_idx == 7:
                     alpha_value = 0xff
                 # Interpolation method 2
-                alpha_value = (((6 - i) * alpha0 + (i - 1) * alpha1) / 5)
+                alpha_value = (((6 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 5)
             dst_buf[px_i + 3] = alpha_value / 0xff
 
     return dst_buf

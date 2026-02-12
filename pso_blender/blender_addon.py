@@ -1,7 +1,8 @@
+from typing import Any, cast
 import bpy
 from bpy.props import PointerProperty
 from bpy.app.handlers import persistent, load_post
-from .rel_export_menu import ExportRel, CUSTOM_PT_export_settings
+from .rel_export_menu import ExportRel
 from .rel_import_menu import ImportRel
 from .rel_properties_menu import (
     MeshRelSettings,
@@ -21,8 +22,9 @@ from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 # We can detect if the code is actually running inside blender by checking if bpy.app.binary_path is set
 if bpy.app.binary_path:
     @persistent
-    def convert_legacy_properties(arg):
+    def convert_legacy_properties(_arg: Any):
         for obj in bpy.data.objects:
+            obj = cast(Any, obj)
             if "nrel" in obj:
                 obj.rel_settings.is_nrel = True
                 del obj["nrel"]
@@ -39,21 +41,22 @@ bml_import_export_description = "BML (PSO)"
 xj_import_export_description = "XJ (PSO)"
 
 
-def menu_func_export(self, context):
-    self.layout.operator(ExportRel.bl_idname, text=rel_import_export_description)
-    self.layout.operator(ExportBml.bl_idname, text=bml_import_export_description)
-    self.layout.operator(ExportXj.bl_idname, text=xj_import_export_description)
+def menu_func_export(self: bpy.types.Menu, _context: bpy.types.Context):
+    if self.layout:
+        _ = self.layout.operator(ExportRel.bl_idname, text=rel_import_export_description)
+        _ = self.layout.operator(ExportBml.bl_idname, text=bml_import_export_description)
+        _ = self.layout.operator(ExportXj.bl_idname, text=xj_import_export_description)
 
 
-def menu_func_import(self, context):
-    self.layout.operator(ImportRel.bl_idname, text=rel_import_export_description)
-    self.layout.operator(ImportBml.bl_idname, text=bml_import_export_description)
-    self.layout.operator(ImportXj.bl_idname, text=xj_import_export_description)
+def menu_func_import(self: bpy.types.Menu, _context: bpy.types.Context):
+    if self.layout:
+        _ = self.layout.operator(ImportRel.bl_idname, text=rel_import_export_description)
+        _ = self.layout.operator(ImportBml.bl_idname, text=bml_import_export_description)
+        _ = self.layout.operator(ImportXj.bl_idname, text=xj_import_export_description)
 
 
 classes = [
     ExportRel,
-    CUSTOM_PT_export_settings,
     ImportRel,
     MeshRelSettings,
     MeshRelSettingsPanel,
@@ -80,10 +83,12 @@ def register():
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
     # Add settings to objects
-    bpy.types.Object.rel_settings = PointerProperty(type=MeshRelSettings)
-    bpy.types.Object.njcm_settings = PointerProperty(type=NjcmNodeSettings)
+    object_as_any = cast(Any, bpy.types.Object)
+    object_as_any.rel_settings = PointerProperty(type=MeshRelSettings)
+    object_as_any.njcm_settings = PointerProperty(type=NjcmNodeSettings)
     # Add settings to materials
-    bpy.types.Material.xj_settings = PointerProperty(type=XjMaterialSettings)
+    material_as_any = cast(Any, bpy.types.Material)
+    material_as_any.xj_settings = PointerProperty(type=XjMaterialSettings)
     # Add hooks
     load_post.append(convert_legacy_properties)
 
@@ -93,6 +98,7 @@ def unregister():
         bpy.utils.unregister_class(clazz)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    del bpy.types.Object.rel_settings
-    del bpy.types.Material.xj_settings
+    del cast(Any, bpy.types.Object).rel_settings
+    del cast(Any, bpy.types.Object).njcm_settings
+    del cast(Any, bpy.types.Material).xj_settings
     load_post.remove(convert_legacy_properties)

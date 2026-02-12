@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import final
 from .serialization import Serializable, Numeric
 
 
@@ -13,6 +14,7 @@ Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
+@final
 class NinjaEvalFlag:
     UNIT_POS = 0b1 # Ignore translation
     UNIT_ANG = 0b10 # Ignore rotation
@@ -43,7 +45,7 @@ class MeshTreeNode(Serializable):
     next: Ptr32 = NULLPTR # MeshTreeNode
 
     @staticmethod
-    def read_tree(mesh_type, buf: bytearray, offset: int):
+    def read_tree(mesh_type: type[Serializable], buf: bytearray, offset: int):
         (node, after) = MeshTreeNode.deserialize_from(buf, offset=offset)
         if node.mesh != NULLPTR:
             node.mesh = mesh_type.deserialize_from(buf, node.mesh)[0]

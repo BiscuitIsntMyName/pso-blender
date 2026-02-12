@@ -1,6 +1,9 @@
 from dataclasses import dataclass, field
+from typing import final
 import bpy
 from warnings import warn
+
+from bpy.types import Collection
 from .serialization import Serializable, Numeric, FixedArray, ResizableBuffer
 from . import prs, njcm, xvm, xj, util, njm
 from .nj import nj_to_blender_mesh
@@ -18,6 +21,7 @@ Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
+@final
 class CompressionType:
     NONE = 0
     PRS = ord("P")
@@ -62,24 +66,24 @@ class FileDescription(Serializable):
 class BmlItem:
     name: str
     models: list[bytearray] = field(default_factory=list)
-    texture_list = None
-    texture_archive = None
-    animation = None
-    pointer_table: list[int] = field(default_factory=list)
+    texture_list: bytearray | None = None
+    texture_archive: bytearray | None = None
+    animation: bytearray | None = None
+    pointer_table: list[tuple[int, int]] = field(default_factory=list)
 
 
 def parse_bml(path: str) -> list[BmlItem]:
     with open(path, "rb") as f:
         bml = bytearray(f.read())
 
-    items = []
+    items: list[BmlItem] = []
     (bml_header, _) = BmlHeader.deserialize_from(bml)
     file_description_offset = BmlHeader.type_size()
     file_alignment = 0x20 if bml_header.has_textures else 0x800
     file_offset = util.align_up(bml_header.file_count * 0x40, 0x800)
     chunk_header_size = IffHeader.type_size()
 
-    for i in range(bml_header.file_count):
+    for _ in range(bml_header.file_count):
         # Read file description
         (file_description, file_description_offset) = FileDescription.deserialize_from(bml, offset=file_description_offset)
         item = BmlItem(name=util.bytes_to_string(file_description.name))
@@ -106,16 +110,16 @@ def parse_bml(path: str) -> list[BmlItem]:
             elif chunk_type == "NMDM":
                 item.animation = chunk_body
             elif chunk_type == "POF0":
-                if prev_chunk_offset is None:
+                if prev_chunk_offset is None or prev_chunk_size is None:
                     # POF0 must always come after another chunk
                     warn("BML Warning: File '{}' contains a POF0 chunk at index zero".format(item.name))
                 else:
-                    item.pointer_table = parse_pof0(item.name, file_data, prev_chunk_offset, prev_chunk_size, chunk_offset, chunk_header.body_size)
+                    item.pointer_table = parse_pof0(item.name, file_data, prev_chunk_offset, chunk_offset, chunk_header.body_size)
             else:
                 warn("BML Warning: File '{}' has an unknown IFF chunk type '{}'".format(item.name, chunk_type))
 
             prev_chunk_offset = chunk_offset
-            prev_chunk_size = chunk_header.body_size
+            prev_chunk_size = int(chunk_header.body_size)
             chunk_offset += chunk_header.body_size + chunk_header_size
 
         file_offset += util.align_up(file_description.compressed_size, file_alignment)
@@ -128,8 +132,8 @@ def parse_bml(path: str) -> list[BmlItem]:
     return items
 
 
-def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm) -> list[bpy.types.Collection]:
-    collections = []
+def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm | None) -> list[Collection]:
+    collections: list[Collection] = []
     if bml_item.name.endswith(".xj"):
         for model in bml_item.models:
             (root_node, _) = njcm.MeshTreeNode.read_tree(xj.Mesh, model, 0)
@@ -142,9 +146,9 @@ def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm) -> list[bpy.types.Collectio
     return collections
 
 
-def read(bml_path: str, bml_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
+def read(bml_path: str, bml_xvm: xvm.Xvm | None) -> list[bpy.types.Collection]:
     bml = parse_bml(bml_path)
-    collections = []
+    collections: list[Collection] = []
     for bml_item in bml:
         if len(bml_item.models) > 0:
             collections += to_blender_mesh(bml_item, bml_xvm)
@@ -154,8 +158,8 @@ def read(bml_path: str, bml_xvm: xvm.Xvm) -> list[bpy.types.Collection]:
 
 
 def write(bml_path: str, xvm_path: str):
-    objects_by_collection = []
-    all_objects = []
+    objects_by_collection: list[BmlItem] = []
+    all_objects: list[bpy.types.Object] = []
     for coll in bpy.data.collections:
         if not coll.hide_viewport:
             objs = BmlItem(name=coll.name)
@@ -169,25 +173,25 @@ def write(bml_path: str, xvm_path: str):
     if len(objects_by_collection) < 1:
         raise Exception("BML Error: No objects")
 
-    bml_buf = ResizableBuffer(0)
-    files_buf = ResizableBuffer(0)
+    bml_buf = ResizableBuffer(size=0)
+    files_buf = ResizableBuffer(size=0)
     texture_man = xvm.TextureManager(all_objects)
 
     # Write BML header at the beginning of the file
     bml_header = BmlHeader(
-        file_count=len(all_objects),
-        compression_type=CompressionType.NONE,
-        has_textures=0
-    )
-    bml_header.serialize_into(bml_buf)
+        file_count=U32(len(all_objects)),
+        compression_type=U8(CompressionType.NONE),
+        has_textures=U8(0))
+    _ = bml_header.serialize_into(bml_buf)
 
     file_alignment = 0x20 if bml_header.has_textures else 0x800
 
+    chunks_size_sum = 0
     # Collection = file inside BML
     for collection in objects_by_collection:
         files_sum_before = files_buf.offset
         njcm_chunk_buf = xj.make_xj(collection.models, texture_man)
-        files_buf.append(njcm_chunk_buf)
+        _ = files_buf.append(njcm_chunk_buf)
         chunks_size_sum = len(njcm_chunk_buf)
         compressed_size = chunks_size_sum
 
@@ -198,11 +202,11 @@ def write(bml_path: str, xvm_path: str):
         # Write file descriptions after BML header
         file_desc = FileDescription(
             name=list(bytes(collection.name[0:28] + ".xj", "ascii")),
-            compressed_size=compressed_size,
-            decompressed_size=chunks_size_sum,
-            textures_compressed_size=0,
-            textures_decompressed_size=0)
-        file_desc.serialize_into(bml_buf)
+            compressed_size=U32(compressed_size),
+            decompressed_size=U32(chunks_size_sum),
+            textures_compressed_size=U32(0),
+            textures_decompressed_size=U32(0))
+        _ = file_desc.serialize_into(bml_buf)
 
     # Write njm's into bml
     for collection in objects_by_collection:
@@ -210,7 +214,7 @@ def write(bml_path: str, xvm_path: str):
             nmdm_chunk_buf = njm.make_njm(collection.models, action)
             # Chunk (+POF0) is done
             files_sum_before = files_buf.offset
-            files_buf.append(nmdm_chunk_buf)
+            _ = files_buf.append(nmdm_chunk_buf)
             chunks_size_sum += len(nmdm_chunk_buf)
             compressed_size = chunks_size_sum
 
@@ -221,20 +225,20 @@ def write(bml_path: str, xvm_path: str):
             # Write file descriptions after BML header
             file_desc = FileDescription(
                 name=list(bytes(collection.name[0:27] + ".njm", "ascii")),
-                compressed_size=compressed_size,
-                decompressed_size=chunks_size_sum,
-                textures_compressed_size=0,
-                textures_decompressed_size=0)
-            file_desc.serialize_into(bml_buf)
+                compressed_size=U32(compressed_size),
+                decompressed_size=U32(chunks_size_sum),
+                textures_compressed_size=U32(0),
+                textures_decompressed_size=U32(0))
+            _ = file_desc.serialize_into(bml_buf)
     
     # Add padding after file descriptions
     bml_buf.grow_to(util.align_up(bml_header.file_count * 0x40, 0x800))
     files_buf.seek_to_end()
     # Write files after descriptions
-    bml_buf.append(files_buf.buffer)
+    _ = bml_buf.append(files_buf.buffer)
     
     with open(bml_path, "wb") as f:
-        f.write(bml_buf.buffer)
+        _ = f.write(bml_buf.buffer)
 
     if xvm_path and texture_man.has_textures():
         xvm.write(xvm_path, texture_man.get_all_textures())

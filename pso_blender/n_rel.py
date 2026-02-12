@@ -1,9 +1,13 @@
 import math
+from typing import cast, final, override
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
 from struct import unpack_from
 import bpy.types
+
+from pso_blender.njcm_node_properties_menu import ObjectWithNjcmSettings
+from pso_blender.rel_properties_menu import ObjectWithRelSettings
 from .rel import Rel
 from .serialization import Serializable, Numeric, AlignedString, FixedArray
 from . import util, xvm, xj, tam
@@ -22,6 +26,7 @@ Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
+@final
 class MeshTreeFlag:
     NO_FOG = 0x1
     RECEIVES_SHADOWS = 0x10
@@ -66,10 +71,12 @@ class Chunk(Serializable):
     animated_mesh_tree_count: U32 = 0
     flags: U32 = 0
 
+    @override
     def __hash__(self):
         return self.id
 
-    def __eq__(self, other):
+    @override
+    def __eq__(self, other: object) -> bool:
         return self.id == other.id
 
 
@@ -85,7 +92,7 @@ class NrelFmt2(Serializable):
 
 
 class NrelError(Exception):
-    def __init__(self, msg: str, *args, obj: bpy.types.Object=None, texture: bpy.types.Image=None):
+    def __init__(self, msg: str, *, obj: bpy.types.Object | None=None, texture: bpy.types.Image | None=None):
         s = "N.REL Error"
         if obj:
             s += " in Object '{}'".format(obj.name)
@@ -97,8 +104,8 @@ class NrelError(Exception):
 
 def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object]) -> dict[Chunk, list[bpy.types.Object]]:
     max_chunk_radius = 1200 # Approximation based on lowest value used by game
-    chunk_to_children = dict()
-    collection_to_chunk = dict()
+    chunk_to_children: dict[Chunk, list[bpy.types.Object]] = dict()
+    collection_to_chunk: dict[str, Chunk] = dict()
     chunk_flags = 0x00010000
     chunk_counter = 0
     # Chunk -1 will always be visible
@@ -112,7 +119,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
         radius=999999.0)
     chunk_to_children[always_rendered_chunk] = []
 
-    ungrouped_objects = []
+    ungrouped_objects: list[bpy.types.Object] = []
     for obj in objects:
         parent_coll = obj.users_collection[0]
         # If object is set to be always rendered then put it in chunk -1
@@ -194,7 +201,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             chunk_to_children[nearest_chunk].append(obj)
             nearest_chunk.static_mesh_tree_count += 1
             # Also calculate chunk radius. Ensure object is definitely within radius by adding its greatest XZ dimension.
-            greatest_obj_dim = max(obj.dimensions.xy * util.get_pso_world_scale())
+            greatest_obj_dim = max((obj.dimensions.xy * util.get_pso_world_scale()).to_tuple())
             radius = math.sqrt(nearest_dist_sq) + greatest_obj_dim
             if radius > nearest_chunk.radius:
                 nearest_chunk.radius = radius
@@ -225,7 +232,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
     for chunk in chunk_to_children:
         chunk_world_pos = Vector((chunk.x, chunk.y, chunk.z))
         chunk_objects = chunk_to_children[chunk]
-        static_mesh_trees = []
+        static_mesh_trees: list[MeshTree] = []
         for obj in chunk_objects:
             blender_mesh = obj.to_mesh()
             util.scale_mesh(blender_mesh, util.get_pso_world_scale())
@@ -236,15 +243,16 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
 
             # One mesh per tree. Create tree, a node, and the mesh.
             tree_flags = 0
-            if not obj.rel_settings.receives_fog:
+            rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+            if not rel_settings.receives_fog:
                 tree_flags |= MeshTreeFlag.NO_FOG
-            if obj.rel_settings.receives_shadows:
+            if rel_settings.receives_shadows:
                 tree_flags |= MeshTreeFlag.RECEIVES_SHADOWS
             if anim_tex:
                 tree_flags |= MeshTreeFlag.HAS_TEXTURE_ANIMATION
-            if obj.rel_settings.is_stencil_viewer:
+            if rel_settings.is_stencil_viewer:
                 tree_flags |= MeshTreeFlag.IS_STENCIL_VIEWER
-            if obj.rel_settings.is_stenciled:
+            if rel_settings.is_stenciled:
                 tree_flags |= MeshTreeFlag.IS_STENCILED
 
             static_mesh_tree = MeshTree(tree_flags=tree_flags)
@@ -255,11 +263,11 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
                     TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff))
             
             eval_flags = 0
-            for x in obj.njcm_settings.eval_flags:
+            for x in cast(set[str], cast(ObjectWithNjcmSettings, obj.njcm_settings).eval_flags):
                 eval_flags |= int(x)
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
-            mesh_node = xj.MeshTreeNode(
+            mesh_node = MeshTreeNode(
                 eval_flags=eval_flags,
                 # Make coords relative to chunk
                 x=mesh_world_pos.x - chunk_world_pos.x,
@@ -300,7 +308,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
     # Write files
     file_contents = rel.finish(rel.write(nrel))
     with open(nrel_path, "wb") as f:
-        f.write(file_contents)
+        _ = f.write(file_contents)
     if xvm_path and len(textures) > 0:
         xvm.write(xvm_path, textures)
     if tam_path and texture_man.has_animated_textures():
@@ -342,7 +350,7 @@ def read(path: str) -> NrelFmt2:
     return nrel
 
 
-def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collection:
+def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
     world_scale = util.get_pso_world_scale()
 
@@ -351,7 +359,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
     for chunk in nrel.chunks:
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
-        chunk_coll["chunk_offset"] = hex(chunk._offset)
+        chunk_coll["chunk_offset"] = hex(chunk.get_offset())
 
         (chunk.y, chunk.z) = (-chunk.z, chunk.y)
         chunk.x /= world_scale
@@ -362,7 +370,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
             segments=4,
             ring_count=4,
             location=(chunk.x, chunk.y, chunk.z))
-        obj = bpy.context.active_object
+        obj = cast(ObjectWithRelSettings, bpy.context.active_object)
         obj.name = "chunk_marker_" + str(chunk.id)
         obj.rel_settings.is_chunk = True
         # Primitives get automatically added to default collection, remove it and add it to our collection
@@ -374,7 +382,7 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
             for obj in models.objects:
                 if not obj.parent:
-                    obj["tree_offset"] = hex(tree._offset)
+                    obj["tree_offset"] = hex(tree.get_offset())
                     util.apply_transform(obj, use_location=True, use_rotation=True)
                     obj.location = (
                         chunk.x + obj.location.x,
@@ -382,12 +390,13 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm) -> bpy.types.Collec
                         chunk.z + obj.location.z)
                     obj.rotation_euler = (chunk.rot_x / 0x7fff * 3.14, chunk.rot_z / 0x7fff * -3.14, chunk.rot_y / 0x7fff * 3.14)
 
-                obj.rel_settings.is_nrel = True
+                rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+                rel_settings.is_nrel = True
                 # Read settings
-                obj.rel_settings.receives_fog = not bool(tree.tree_flags & MeshTreeFlag.NO_FOG)
-                obj.rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
-                obj.rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
-                obj.rel_settings.is_stenciled = bool(tree.tree_flags & MeshTreeFlag.IS_STENCILED)
+                rel_settings.receives_fog = not bool(tree.tree_flags & MeshTreeFlag.NO_FOG)
+                rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
+                rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
+                rel_settings.is_stenciled = bool(tree.tree_flags & MeshTreeFlag.IS_STENCILED)
                 # Make objects direct children of chunk collection instead
                 chunk_coll.objects.link(obj)
             # Remove now empty collection

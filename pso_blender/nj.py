@@ -1,5 +1,9 @@
+from collections.abc import Buffer
+from typing import override
 import bpy, warnings
 from dataclasses import dataclass, field
+
+from bpy.types import Collection
 from .serialization import Serializable, Numeric
 from .njcm import MeshTreeNode
 
@@ -59,7 +63,8 @@ class Mesh(Serializable):
     z: F32 = 0.0
 
     @classmethod
-    def deserialize_from(cls, buf, offset):
+    @override
+    def deserialize_from(cls, buf: Buffer, offset: int=0):
         (mesh, after) = super(Mesh, cls).deserialize_from(buf, offset)
         vertex_list_offset = mesh.vertex_list - offset
         mesh.vertex_list = []
@@ -77,7 +82,7 @@ class Mesh(Serializable):
         return (mesh, after)
 
 
-def nj_to_blender_mesh(name: str, buf: bytearray, offset: int) -> bpy.types.Collection:
+def nj_to_blender_mesh(name: str, buf: bytearray, offset: int) -> Collection | None:
     (model, _) = MeshTreeNode.read_tree(Mesh, buf, offset)
     if model.mesh == NULLPTR:
         return None

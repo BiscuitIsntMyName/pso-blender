@@ -1,28 +1,34 @@
 from struct import pack_into, unpack_from
+from typing import final, override
 from warnings import warn
 from .serialization import Serializable, ResizableBuffer, Numeric
 from .util import AbstractFileArchive
 
 
+@final
 class Rel(AbstractFileArchive):
     ALIGNMENT = 4
     POINTER_TABLE_POINTER_OFFSET = -0x20
     POINTER_COUNT_OFFSET = -0x1c
     PAYLOAD_POINTER_OFFSET = -0x10
 
-    def __init__(self, *args, buf=None):
+    payload_offset: int | None
+    buf: ResizableBuffer
+
+    def __init__(self, *, buf: ResizableBuffer | None=None):
         if buf is None:
-            self.buf = ResizableBuffer(0)
+            self.buf = ResizableBuffer(size=0)
             # Consume the 0th offset to ensure that no userdata can have pointers that point to 0
             # because we use 0 as nullptr even though technically it would be a valid offset
-            self.buf.pack(Numeric.endianness_prefix + "L", 0)
+            _ = self.buf.pack(Numeric.endianness_prefix + "L", 0)
             self.payload_offset = None
         else:
             self.buf = buf
         self.pointer_offsets: list[int] = []
         self.warned_misalignment = False
 
-    def write(self, item: Serializable, ensure_aligned=False) -> int:
+    @override
+    def write(self, item: Serializable, ensure_aligned: bool=False) -> int:
         item_offset = item.serialize_into(self.buf, Rel.ALIGNMENT if ensure_aligned else None)
         if not self.warned_misalignment and self.buf.offset % Rel.ALIGNMENT != 0:
             self.warned_misalignment = True
@@ -50,7 +56,7 @@ class Rel(AbstractFileArchive):
         for abs_offset in self.pointer_offsets:
             rel_offset = (abs_offset - prev_pointer_offset) // 4
             prev_pointer_offset = abs_offset
-            self.buf.pack(Numeric.endianness_prefix + "H", rel_offset)
+            _ = self.buf.pack(Numeric.endianness_prefix + "H", rel_offset)
         # Create trailer
         self.buf.grow_by(0x20)
         pack_into(Numeric.endianness_prefix + "L", self.buf.buffer, Rel.POINTER_TABLE_POINTER_OFFSET, pointer_table_offset)
@@ -78,7 +84,7 @@ class Rel(AbstractFileArchive):
 
         return rel
     
-    def read(self, cls, offset=0):
+    def read[T: Serializable](self, cls: type[T], offset: int=0) -> tuple[T, int]:
         return cls.deserialize_from(self.buf.buffer, offset)
     
     def is_nonnull_pointer(self, offset: int) -> bool:

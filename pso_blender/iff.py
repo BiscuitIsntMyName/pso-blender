@@ -1,3 +1,4 @@
+from typing import final, override
 from warnings import warn
 from struct import pack_into, unpack_from
 from dataclasses import dataclass, field
@@ -22,19 +23,24 @@ class IffHeader(Serializable):
     body_size: U32 = 0
 
 
+@final
 class IffChunk(util.AbstractFileArchive):
     ALIGNMENT = 4
 
+    buf: ResizableBuffer
+    pointer_offsets: list[int]
+
     def __init__(self, type_name: str):
-        self.buf = ResizableBuffer(0)
-        self.pointer_offsets: list[int] = []
+        self.buf = ResizableBuffer(size=0)
+        self.pointer_offsets = []
         self.warned_misalignment = False
         header = IffHeader(
             type_name=list(bytes(type_name, "ascii")),
             body_size=0xdeadbeef) # Body size is not known yet, we will write it here at the end
-        header.serialize_into(self.buf)
+        _ = header.serialize_into(self.buf)
 
-    def write(self, item: Serializable, ensure_aligned=False) -> int:
+    @override
+    def write(self, item: Serializable, ensure_aligned: bool=False) -> int:
         header_size = IffHeader.type_size()
         # Subtract header to make pointers relative to body
         item_offset = item.serialize_into(self.buf, IffChunk.ALIGNMENT if ensure_aligned else None) - header_size
@@ -62,7 +68,7 @@ class IffChunk(util.AbstractFileArchive):
         pof0_header = IffHeader(
             type_name=list(bytes("POF0", "ascii")),
             body_size=0xdeadbeef) # Body size is not known yet, we will write it here at the end
-        pof0_header.serialize_into(self.buf)
+        _ = pof0_header.serialize_into(self.buf)
         # Write pointer table
         self.pointer_offsets.sort()
         prev_pointer_offset = 0
@@ -72,13 +78,13 @@ class IffChunk(util.AbstractFileArchive):
             # Add pointer size control flag based on how big the pointer is
             if rel_offset < size_control_1:
                 rel_offset |= size_control_1
-                self.buf.pack(">B", rel_offset)
+                _ = self.buf.pack(">B", rel_offset)
             elif rel_offset < (size_control_1 << 0x8):
                 rel_offset |= size_control_2 << 0x8
-                self.buf.pack(">H", rel_offset)
+                _ = self.buf.pack(">H", rel_offset)
             elif rel_offset < (size_control_1 << 0x18):
                 rel_offset |= size_control_4 << 0x18
-                self.buf.pack(">L", rel_offset)
+                _ = self.buf.pack(">L", rel_offset)
             else:
                 raise Exception("BML error: Gap between pointers is too big ({})".format(abs_offset - prev_pointer_offset))
         # Write POF0 body size
@@ -86,10 +92,10 @@ class IffChunk(util.AbstractFileArchive):
         return self.buf.buffer
 
 
-def parse_pof0(filename: str, file_data: bytearray, prev_chunk_offset: int, prev_chunk_size: int, pof0_offset: int, pof0_size: int) -> list[int]:
+def parse_pof0(filename: str, file_data: bytearray, prev_chunk_offset: int, pof0_offset: int, pof0_size: int) -> list[tuple[int, int]]:
     "POF0 chunk contains a pointer rewrite table for the preceding chunk"
     header_size = IffHeader.type_size()
-    pointer_table = []
+    pointer_table: list[tuple[int, int]] = []
     read_cursor = pof0_offset + header_size
     pointer_offset = prev_chunk_offset + header_size
     
@@ -116,6 +122,8 @@ def parse_pof0(filename: str, file_data: bytearray, prev_chunk_offset: int, prev
                 file_data[read_cursor + 2] << 0x8 |
                 file_data[read_cursor + 3])
             read_cursor += 4
+        else:
+            raise Exception("Unknown POF0 flag in file '{}': {}".format(filename, hex(pof_flags)))
         # Offsets are relative to the previous offset and divided by four (similar to REL)
         pointer_offset += relative_offset * 4
         (pointer, ) = unpack_from(Numeric.endianness_prefix + "L", file_data, offset=pointer_offset)

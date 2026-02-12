@@ -1,16 +1,21 @@
+from collections.abc import Sequence
 import math
-from mathutils import Vector, Matrix
+from typing import Any, cast
+from mathutils import Euler, Vector, Matrix
 import bpy.types 
 from dataclasses import field
 from abc import ABC, abstractmethod
+
+from pso_blender.xj_material_properties_menu import MaterialWithXjSettings
 from .serialization import Serializable
 
 
 def mesh_faces(mesh: bpy.types.Mesh) -> list[tuple[int, int, int]]:
     """Returns vertex indices of triangulated faces"""
-    faces = []
+    faces: list[tuple[int, int, int]] = []
     for tri in mesh.loop_triangles:
-        faces.append(tuple(tri.vertices))
+        v = tri.vertices
+        faces.append((v[0], v[1], v[2]))
     return faces
 
 
@@ -23,7 +28,7 @@ class Texture:
     image: bpy.types.Image
     animation_frames: int
 
-    def __init__(self, *args, id: int=None, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
+    def __init__(self, *, id: int, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
         self.name = image.filepath_from_user() or image.name # Path can be empty if texture was created programmatically
         self.material_name = material_name
@@ -33,7 +38,7 @@ class Texture:
         # Check if texture uses alpha
         self.has_alpha = image.channels == 4
         if self.has_alpha:
-            pixels = list(image.pixels)
+            pixels = list(cast(Any, image.pixels))
             self.has_alpha = False
             for i in range(0, len(pixels), 4):
                 if pixels[i + 3] < 1:
@@ -43,15 +48,20 @@ class Texture:
 
 def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
     """Assumes the first image node of each material is the correct one"""
-    textures = []
+    textures: list[Texture] = []
     for mat_slot in obj.material_slots:
         if not mat_slot.material or not mat_slot.material.node_tree:
             continue
         for node in mat_slot.material.node_tree.nodes:
-            if node.type == "TEX_IMAGE" and node.image:
-                textures.append(Texture(
-                    material_name=mat_slot.material.name, generate_mipmaps=mat_slot.material.xj_settings.generate_mipmaps, image=node.image))
-                break
+            if node.type == "TEX_IMAGE":
+                tex_node = cast(bpy.types.ShaderNodeTexImage, node)
+                if tex_node.image is not None:
+                    xj_settings = cast(MaterialWithXjSettings, mat_slot.material).xj_settings
+                    generate_mipmaps = cast(bool, xj_settings.generate_mipmaps)
+                    textures.append(Texture(
+                        id=-1,
+                        material_name=mat_slot.material.name, generate_mipmaps=generate_mipmaps, image=tex_node.image))
+                    break
     return textures
 
 
@@ -63,7 +73,7 @@ def magic_field(s: str):
     return field(default_factory=lambda: magic_bytes(s))
 
 
-def from_blender_axes(tup, invert_z=True) -> Vector:
+def from_blender_axes(tup: Sequence[float] | Vector | Euler, invert_z: bool=True) -> Vector:
     """Swaps second and third component"""
     x, z, y = tup
     if invert_z:
@@ -71,26 +81,27 @@ def from_blender_axes(tup, invert_z=True) -> Vector:
     return Vector((x, y, z))
 
 
-def distance_squared(a, b) -> float:
+def distance_squared(a: Sequence[float], b: Sequence[float]) -> float:
     return sum(map(lambda a_, b_: (b_ - a_) ** 2, a, b))
 
 
-def distance(a, b) -> float:
+def distance(a: Sequence[float], b: Sequence[float]) -> float:
     return math.sqrt(distance_squared(a, b))
 
 
 def geometry_world_center(obj: bpy.types.Object) -> Vector:
-    local = 1 / 8 * sum((Vector(corner) for corner in obj.bound_box), Vector())
+    bound_box = obj.bound_box
+    local = 1 / 8 * sum((Vector(corner) for corner in bound_box), Vector())
     return obj.matrix_world @ local
 
 
-def clamp(n, min_val, max_val):
+def clamp[T: int | float](n: T, min_val: T, max_val: T) -> T:
     return max(min(n, max_val), min_val)
 
 
 class AbstractFileArchive(ABC):
     @abstractmethod
-    def write(self, item: Serializable, ensure_aligned=False) -> int:
+    def write(self, item: Serializable, ensure_aligned: bool=False) -> int:
         pass
 
 
@@ -102,7 +113,7 @@ def align_up(n: int, to: int) -> int:
     return (n + to - 1) // to * to
 
 
-def scale_mesh(mesh: bpy.types.Mesh, x: float, y: float=None, z: float=None):
+def scale_mesh(mesh: bpy.types.Mesh, x: float, y: float | None=None, z: float | None=None):
     if y is None:
         y = x
     if z is None:
@@ -114,10 +125,10 @@ def get_pso_world_scale() -> float:
     return 33.0
 
 
-def apply_transform(ob, use_location=False, use_rotation=False, use_scale=False):
+def apply_transform(ob: bpy.types.Object, use_location: bool=False, use_rotation: bool=False, use_scale: bool=False):
     mb = ob.matrix_basis
     ident = Matrix()
-    loc, rot, scale = mb.decompose()
+    loc, _rot, scale = mb.decompose()
 
     # rotation
     T = Matrix.Translation(loc)
@@ -128,7 +139,7 @@ def apply_transform(ob, use_location=False, use_rotation=False, use_scale=False)
     transform = [ident, ident, ident]
     basis = [T, R, S]
 
-    def swap(i):
+    def swap(i: int):
         transform[i], basis[i] = basis[i], transform[i]
 
     if use_location:
@@ -140,7 +151,7 @@ def apply_transform(ob, use_location=False, use_rotation=False, use_scale=False)
         
     M = transform[0] @ transform[1] @ transform[2]
     if hasattr(ob.data, "transform"):
-        ob.data.transform(M)
+        cast(Any, ob.data).transform(M)
     for c in ob.children:
         c.matrix_local = M @ c.matrix_local
         
@@ -148,7 +159,7 @@ def apply_transform(ob, use_location=False, use_rotation=False, use_scale=False)
 
 
 def get_set_bits(n: int) -> list[int]:
-    bits = []
+    bits: list[int] = []
     i = 0
     while n:
         if n & 1:
@@ -158,7 +169,7 @@ def get_set_bits(n: int) -> list[int]:
     return bits
 
 
-def get_parent_collection(child_collection: bpy.types.Collection) -> bpy.types.Collection:
+def get_parent_collection(child_collection: bpy.types.Collection) -> bpy.types.Collection | None:
     for collection in bpy.data.collections:
         if child_collection.name in collection.children.keys():
             return collection

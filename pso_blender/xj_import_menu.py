@@ -1,11 +1,15 @@
 import os, bpy
+from typing import cast, final, override
+from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ImportHelper
-from bpy.types import Operator
+from bpy.types import Context, Operator
 from bpy.props import StringProperty
 from . import xj, xvm
 
 
-class ImportXj(Operator, ImportHelper):
+# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
+@final
+class ImportXj(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMethodOverride]
     # This is the tooltip when you hover over the import button. Blender 4.4 seems to have a bug that causes a crash if the tooltip is empty lol
     "Import XJ"
 
@@ -25,13 +29,16 @@ class ImportXj(Operator, ImportHelper):
         options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH")
 
-    def execute(self, context):
+    @override
+    def execute(self, context: Context) -> set[OperatorReturnItems]:
         xj_path = None
         xvm_path = None
-        for f in self.files:
-            noext, ext = os.path.splitext(f.name)
+        selected_files = cast(bpy.types.OperatorFileListElement, self.files)
+        selected_files_dir = cast(str, self.directory)
+        for f in selected_files:
+            _noext, ext = os.path.splitext(f.name)
             ext = ext.lower()
-            filepath = os.path.join(self.directory, f.name)
+            filepath = os.path.join(selected_files_dir, f.name)
             if ext == ".xj":
                 if xj_path:
                     self.report({"ERROR"}, "Only one .xj may be imported at once")
@@ -45,9 +52,12 @@ class ImportXj(Operator, ImportHelper):
             else:
                 self.report({"ERROR"}, "Expected .xj or .xvm, was \"{}\"".format(ext))
                 return {"CANCELLED"}
-
+        if xj_path is None:
+            self.report({"ERROR"}, "No .xj selected")
+            return {"CANCELLED"}
         xj_xvm = xvm.read(xvm_path) if xvm_path else None
         collections = xj.read(xj_path, xj_xvm)
-        for coll in collections:
-            bpy.context.scene.collection.children.link(coll)
+        if bpy.context.scene is not None:
+            for coll in collections:
+                bpy.context.scene.collection.children.link(coll)
         return {"FINISHED"}

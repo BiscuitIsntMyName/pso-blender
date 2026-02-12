@@ -1,11 +1,15 @@
 import os
+from typing import cast, final, override
+from bpy.stub_internal.rna_enums import OperatorReturnItems
 from bpy_extras.io_utils import ExportHelper
-from bpy.types import Operator
-from bpy.props import StringProperty
+from bpy.types import Context, Operator
+from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from . import bml
 
 
-class ExportBml(Operator, ExportHelper):
+# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
+@final
+class ExportBml(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMethodOverride]
     "Export BML"
 
 
@@ -23,10 +27,9 @@ class ExportBml(Operator, ExportHelper):
 
     filepath: StringProperty(subtype="FILE_PATH")
 
-    def execute(self, context):
-        noext, ext = os.path.splitext(self.filepath)
-        bml.write(self.filepath, noext + ".xvm")
+    @override
+    def execute(self, context: Context) -> set[OperatorReturnItems]:
+        filepath = cast(str, self.filepath)
+        noext, _ext = os.path.splitext(filepath)
+        bml.write(filepath, noext + ".xvm")
         return {"FINISHED"}
-    
-    def draw(self, context):
-        pass
