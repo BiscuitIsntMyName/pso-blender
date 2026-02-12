@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import cast
 import unittest
 from pso_blender.serialization import Serializable, Numeric, ResizableBuffer, FixedArray
 
@@ -71,23 +72,25 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(MyFlexStruct.type_size(), 4)
 
     def test_resizable_buffer_pack(self):
-        buf = ResizableBuffer(0)
+        buf = ResizableBuffer(size=0)
         fmt = Numeric.format_of_type(U32)
+        self.assertTrue(fmt)
+        fmt = cast(str, fmt)
         size = Numeric.size_of_format(fmt)
-        buf.pack(fmt, 123)
+        _ = buf.pack(fmt, 123)
         self.assertEqual(buf.capacity, size)
         self.assertEqual(buf.offset, size)
     
     def test_serialize_basic_struct_unaligned(self):
-        buf = ResizableBuffer(0)
+        buf = ResizableBuffer(size=0)
         item = MyUnalignedStruct()
-        item.serialize_into(buf)
+        _ = item.serialize_into(buf)
         self.assertEqual(buf.offset, 6)
     
     def test_serialize_basic_struct_aligned(self):
-        buf = ResizableBuffer(0)
+        buf = ResizableBuffer(size=0)
         item = MyUnalignedStruct()
-        item.serialize_into(buf, 4)
+        _ = item.serialize_into(buf, 4)
         self.assertEqual(buf.offset, 8)
 
     def test_struct_nonnull_pointer_member_offsets(self):
@@ -96,8 +99,8 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(item.nonnull_pointer_member_offsets(), [11])
     
     def test_serialize_buffer_member(self):
-        buf = ResizableBuffer(0)
-        data = b"\xde\xad\xbe\xef"
+        buf = ResizableBuffer(size=0)
+        data = bytearray(b"\xde\xad\xbe\xef")
         item = MyBufferStruct(data=data, data_count=len(data))
         offset = item.serialize_into(buf)
         self.assertEqual(offset, 0)
@@ -108,9 +111,9 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(buf.buffer[7], 0xef)
     
     def test_fixed_array(self):
-        buf = ResizableBuffer(0)
+        buf = ResizableBuffer(size=0)
         item = MyFixedArrayStruct(name=list(str.encode("deadbeef")), flags=0xdeadbeef)
-        item.serialize_into(buf)
+        _ = item.serialize_into(buf)
         self.assertEqual(buf.buffer[0:8], b"deadbeef")
         self.assertEqual(buf.buffer[8:16], b"\0\0\0\0\0\0\0\0")
         self.assertEqual(buf.buffer[16:24], b"\xef\xbe\xad\xde")
@@ -127,10 +130,10 @@ class TestDeserialization(unittest.TestCase):
 
     def test_fixed_array(self):
         buf = b"deadbeef\0\0\0\0\0\0\0\0\xef\xbe\xad\xde"
-        (result, offset) = MyFixedArrayStruct.deserialize_from(buf)
+        (result, _offset) = MyFixedArrayStruct.deserialize_from(buf)
         self.assertEqual(bytes(result.name[0:8]).decode(), "deadbeef")
         self.assertEqual(result.flags, 0xdeadbeef)
 
 
 if __name__ == '__main__':
-    unittest.main()
+    _ = unittest.main()
