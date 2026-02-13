@@ -1,5 +1,5 @@
-import math
-from typing import cast, final, override
+import math, os
+from typing import Literal, cast, final, override
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
@@ -77,12 +77,12 @@ class Chunk(Serializable):
 
     @override
     def __eq__(self, other: object) -> bool:
-        return self.id == other.id
+        return isinstance(other, Chunk) and self.id == other.id
 
 
 @dataclass
 class NrelFmt2(Serializable):
-    magic: FixedArray(U8, 4) = field(default_factory=list)
+    magic: FixedArray[U8, Literal[4]] = field(default_factory=list)
     unk1: U32 = 0
     chunk_count: U16 = 0
     unk2: U16 = 0
@@ -123,7 +123,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
     for obj in objects:
         parent_coll = obj.users_collection[0]
         # If object is set to be always rendered then put it in chunk -1
-        if obj.rel_settings.always_rendered:
+        if cast(ObjectWithRelSettings, obj).rel_settings.always_rendered:
             chunk_to_children[always_rendered_chunk].append(obj)
         elif parent_coll.name.startswith("chunk"):
             # Create a chunk if object belongs to a collection whose name starts with "chunk"
@@ -156,7 +156,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
         furthest_dist_sq = 0
         for obj in objs:
             obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
-            dist_sq = util.distance_squared(obj_center.xy, Vector((chunk_center.x, chunk_center.z, 0.0)).xy)
+            dist_sq = util.distance_squared(obj_center.xy.to_tuple(), Vector((chunk_center.x, chunk_center.z, 0.0)).xy.to_tuple())
             if dist_sq > furthest_dist_sq:
                 furthest_dist_sq = dist_sq
         chunk.radius = math.sqrt(furthest_dist_sq)
@@ -185,15 +185,15 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             chunk_counter += 1
         # Find each object's nearest chunk marker
         for obj in ungrouped_objects:
-            if obj.rel_settings.always_rendered:
+            if cast(ObjectWithRelSettings, obj).rel_settings.always_rendered:
                 continue
             obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
-            nearest_chunk = None
+            nearest_chunk = always_rendered_chunk
             nearest_dist_sq = float("inf")
             for chunk in chunk_to_children:
                 if chunk.id == -1:
                     continue
-                dist_sq = util.distance_squared(obj_center.xz, Vector((chunk.x, 0.0, chunk.z)).xz)
+                dist_sq = util.distance_squared(obj_center.xz.to_tuple(), Vector((chunk.x, 0.0, chunk.z)).xz.to_tuple())
                 if dist_sq < nearest_dist_sq:
                     nearest_dist_sq = dist_sq
                     nearest_chunk = chunk
@@ -263,7 +263,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
                     TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff))
             
             eval_flags = 0
-            for x in cast(set[str], cast(ObjectWithNjcmSettings, obj.njcm_settings).eval_flags):
+            for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
                 eval_flags |= int(x)
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
@@ -318,6 +318,9 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
 def read(path: str) -> NrelFmt2:
     with open(path, "rb") as f:
         rel = Rel.read_from(bytearray(f.read()))
+    if rel.payload_offset is None:
+        filename = os.path.basename(path)
+        raise Exception("Rel error in file '{}': Missing payload".format(filename))
     (nrel, _) = rel.read(NrelFmt2, rel.payload_offset)
 
     fmt_magic = util.bytes_to_string(nrel.magic)

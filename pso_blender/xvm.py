@@ -1,4 +1,4 @@
-from typing import Any, cast, final
+from typing import Any, Literal, cast, final
 import os, pathlib, marshal, json, hashlib, warnings, time, sys
 from dataclasses import dataclass, field
 import bpy
@@ -12,7 +12,7 @@ from .iff import IffHeader
 worker_path = os.path.dirname(os.path.abspath(__file__))
 if worker_path not in sys.path:
     sys.path.insert(0, worker_path)
-import dxt
+import dxt  # pyright: ignore[reportImplicitRelativeImport]
 
 
 U8 = Numeric.U8
@@ -71,7 +71,7 @@ class XvrFlags:
 
 @dataclass
 class Xvr(Serializable):
-    magic: FixedArray(U8, 4) = magic_field("XVRT")
+    magic: FixedArray[U8, Literal[4]] = magic_field("XVRT")
     body_size: U32 = 0
     flags: U32 = 0
     format: U32 = 0
@@ -94,7 +94,7 @@ XVM_ITEM_ALIGNMENT = 64
 
 @dataclass
 class Xvm(Serializable):
-    magic: FixedArray(U8, 4) = magic_field("XVMH")
+    magic: FixedArray[U8, Literal[4]] = magic_field("XVMH")
     body_size: U32 = 0
     xvr_count: U32 = 0
     unk1: U32 = 0
@@ -283,13 +283,13 @@ def make_xvr(tex: Texture) -> Xvr:
             # Remove temporary copies because Blender automatically saves them in the scene
             bpy.data.images.remove(level)
     return Xvr(
-        body_size=U32(len(data) + Xvr.type_size() - IffHeader.type_size()),
-        id=U32(tex.id),
-        flags=U32(flags),
-        format=U32(xvr_format),
-        width=U16(img_width),
-        height=U16(img_height),
-        data_size=U32(len(data)),
+        body_size=len(data) + Xvr.type_size() - IffHeader.type_size(),
+        id=tex.id,
+        flags=flags,
+        format=xvr_format,
+        width=img_width,
+        height=img_height,
+        data_size=len(data),
         data=data)  # pyright: ignore[reportArgumentType]
 
 
@@ -312,7 +312,7 @@ def write(path: str, textures: list[Texture]):
         checksum = texture_checksum(tex)
         if os.path.isfile(cached_xvr_path) and checksum == cache_index.get(xvr_basename):
             xvr = get_cached_xvr(cached_xvr_path)
-            xvr.id = U32(tex.id) # Use new texture id
+            xvr.id = tex.id # Use new texture id
         else:
             xvr = make_xvr(tex)
             cache_xvr(cached_xvr_path, xvr)
@@ -322,8 +322,8 @@ def write(path: str, textures: list[Texture]):
     buf = ResizableBuffer(size=0)
     # I'll just explicitly write the lists because it's easier
     xvm = Xvm(
-        body_size=U32(Xvm.type_size() - IffHeader.type_size()),
-        xvr_count=U32(len(xvrs)))
+        body_size=Xvm.type_size() - IffHeader.type_size(),
+        xvr_count=len(xvrs))
     _ = xvm.serialize_into(buf)
     for xvr in xvrs:
         data = xvr.data

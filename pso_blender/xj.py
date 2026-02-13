@@ -369,15 +369,15 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             world_vert.w = 0
             world_vert = util.from_blender_axes((obj.matrix_world @ world_vert).to_3d())
             vertex = vertex_ctor(
-                x=F32(world_vert[0]),
-                y=F32(world_vert[1]),
-                z=F32(world_vert[2]))
+                x=world_vert[0],
+                y=world_vert[1],
+                z=world_vert[2])
             vertex_buffer.vertices[loop_idx] = vertex
             # Get UVs
             if has_textures:
                 u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
-                vertex.u = F32(u)
-                vertex.v = F32(v)
+                vertex.u = u
+                vertex.v = v
             # Get colors
             if vertex_colors:
                 if vertex_colors.domain == "POINT":
@@ -388,27 +388,27 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
                     raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 # BGRA
                 # Need to clamp because light baking can cause values to go higher than normal
-                vertex.b = U8(int(util.clamp(col[0], 0.0, 1.0) * 0xff))
-                vertex.g = U8(int(util.clamp(col[1], 0.0, 1.0) * 0xff))
-                vertex.r = U8(int(util.clamp(col[2], 0.0, 1.0) * 0xff))
-                vertex.a = U8(int(util.clamp(col[3], 0.0, 1.0) * 0xff))
+                vertex.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
+                vertex.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
+                vertex.r = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
+                vertex.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
             if use_normals:
                 # Vertex or face normal
                 normal = local_vert.normal if normal_type == NormalType.Vertex else face.normal
                 normal = normal.to_4d()
                 normal.w = 0
                 normal = util.from_blender_axes((obj.matrix_world @ normal).to_3d().normalized())
-                vertex.nx = F32(normal[0])
-                vertex.ny = F32(normal[1])
-                vertex.nz = F32(normal[2])
+                vertex.nx = normal[0]
+                vertex.ny = normal[1]
+                vertex.nz = normal[2]
 
     # Put all vertices in one buffer
-    xj_mesh.vertex_buffer_count = U32(1)
-    xj_mesh.vertex_buffers = Ptr32(destination.write(VertexBufferContainer(
-        vertex_format=U32(vertex_format),
-        vertex_buffer=Ptr32(destination.write(vertex_buffer)),
-        vertex_size=U32(vertex_size),
-        vertex_count=U32(len(vertex_buffer.vertices)))))
+    xj_mesh.vertex_buffer_count = 1
+    xj_mesh.vertex_buffers = destination.write(VertexBufferContainer(
+        vertex_format=vertex_format,
+        vertex_buffer=destination.write(vertex_buffer),
+        vertex_size=vertex_size,
+        vertex_count=len(vertex_buffer.vertices)))
 
 
 class MaterialStrips:
@@ -753,7 +753,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
 
     # Get the attributes of each vertex buffer
     vertex_sets: list[list[tuple[float, float, float]]] = []
-    normal_sets: list[list[tuple[float, float, float]]] = []
+    normal_sets: list[list[list[float]]] = []
     uv_sets: list[list[tuple[float, float]]] = []
     color_sets: list[list[tuple[int, int, int]]] = []
 
@@ -761,7 +761,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     for vertex_buffer in node.mesh.vertex_buffers:
         vertices: list[tuple[float, float, float]] = []
         colors: list[tuple[int, int, int]] = []
-        normals: list[tuple[float, float, float]] = []
+        normals: list[list[float]] = []
         uvs: list[tuple[float, float]] = []
         has_color = vertex_has_color(vertex_buffer.vertex_format)
         has_normals = vertex_has_normals(vertex_buffer.vertex_format)
@@ -773,7 +773,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
             if has_color:
                 colors.append((vertex.r, vertex.g, vertex.b))
             if has_normals:
-                normals.append((vertex.nx, -vertex.nz, vertex.ny))
+                normals.append([vertex.nx, -vertex.nz, vertex.ny])
             if has_uvs:
                 uvs.append((vertex.u, vertex.v))
         vertex_sets.append(vertices)
@@ -837,7 +837,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         # Add normals if any
         if len(normals) > 0:
             # This function automatically converts from per-vertex to per-loop
-            blender_mesh.normals_split_custom_set_from_vertices(normals)
+            blender_mesh.normals_split_custom_set_from_vertices(normals)  # pyright: ignore[reportUnknownMemberType]
 
         # Add vertex colors
         color_attribute = cast(FloatColorAttribute, blender_mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT"))
@@ -953,9 +953,9 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
             scale_z=1.0)
         
         if not has_mesh:
-            mesh_node.x = F32(obj.location[0] * world_scale)
-            mesh_node.y = F32(obj.location[2] * world_scale)
-            mesh_node.z = F32(-obj.location[1] * world_scale)
+            mesh_node.x = obj.location[0] * world_scale
+            mesh_node.y = obj.location[2] * world_scale
+            mesh_node.z = -obj.location[1] * world_scale
 
         # Pointers will be overwritten later but we need to mark them as non-null or they won't be saved in the POF0 table
         if has_mesh:

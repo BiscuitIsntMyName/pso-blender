@@ -128,10 +128,10 @@ def write(path: str, objects: list[bpy.types.Object]):
             TerrainFlag.Grass: obj.vertex_groups.get("terrain_grass")}
 
         node = CrelNode(
-            flags=U32(collision_flags),
-            x=F32(geom_center[0]),
-            y=F32(geom_center[1]),
-            z=F32(geom_center[2]))
+            flags=collision_flags,
+            x=geom_center[0],
+            y=geom_center[1],
+            z=geom_center[2])
         farthest_sq = float("-inf")
         # Get vertices and find farthest vertex
         for local_vert in blender_mesh.vertices:
@@ -194,9 +194,9 @@ def write(path: str, objects: list[bpy.types.Object]):
             if first_face_ptr is None:
                 first_face_ptr = ptr
         if first_face_ptr is not None:
-            mesh.faces = Ptr32(first_face_ptr)
+            mesh.faces = first_face_ptr
 
-        node.mesh = Ptr32(rel.write(mesh))
+        node.mesh = rel.write(mesh)
         nodes.append(node)
 
         obj.to_mesh_clear() # Delete temporary mesh
@@ -209,7 +209,7 @@ def write(path: str, objects: list[bpy.types.Object]):
             first_node_ptr = ptr
     crel = Crel()
     if first_node_ptr is not None:
-        crel.nodes = Ptr32(first_node_ptr)
+        crel.nodes = first_node_ptr
     file_contents = rel.finish(rel.write(crel))
     with open(path, "wb") as f:
         _ = f.write(file_contents)

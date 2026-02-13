@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import final
+from typing import Literal, final
 import bpy
 from warnings import warn
 
@@ -51,7 +51,7 @@ class BmlHeader(Serializable):
 
 @dataclass
 class FileDescription(Serializable):
-    name: FixedArray(U8, 32) = field(default_factory=list)
+    name: FixedArray[U8, Literal[32]] = field(default_factory=list)
     compressed_size: U32 = 0
     unk1: U32 = 0
     decompressed_size: U32 = 0
@@ -140,7 +140,9 @@ def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm | None) -> list[Collection]:
             collections.append(xj.xj_to_blender_mesh(bml_item.name, root_node, xvm))
     elif bml_item.name.endswith(".nj"):
         for model in bml_item.models:
-            collections.append(nj_to_blender_mesh(bml_item.name, model, 0))
+            coll = nj_to_blender_mesh(bml_item.name, model, 0)
+            if coll is not None:
+                collections.append(coll)
     else:
         raise Exception("BML Error: Failed to identify model format. Expected filename to end with '.nj' or '.xj', but it was '{}'.".format(bml_item.name))
     return collections
@@ -179,9 +181,9 @@ def write(bml_path: str, xvm_path: str):
 
     # Write BML header at the beginning of the file
     bml_header = BmlHeader(
-        file_count=U32(len(all_objects)),
-        compression_type=U8(CompressionType.NONE),
-        has_textures=U8(0))
+        file_count=len(all_objects),
+        compression_type=CompressionType.NONE,
+        has_textures=0)
     _ = bml_header.serialize_into(bml_buf)
 
     file_alignment = 0x20 if bml_header.has_textures else 0x800
@@ -202,10 +204,10 @@ def write(bml_path: str, xvm_path: str):
         # Write file descriptions after BML header
         file_desc = FileDescription(
             name=list(bytes(collection.name[0:28] + ".xj", "ascii")),
-            compressed_size=U32(compressed_size),
-            decompressed_size=U32(chunks_size_sum),
-            textures_compressed_size=U32(0),
-            textures_decompressed_size=U32(0))
+            compressed_size=compressed_size,
+            decompressed_size=chunks_size_sum,
+            textures_compressed_size=0,
+            textures_decompressed_size=0)
         _ = file_desc.serialize_into(bml_buf)
 
     # Write njm's into bml
@@ -225,10 +227,10 @@ def write(bml_path: str, xvm_path: str):
             # Write file descriptions after BML header
             file_desc = FileDescription(
                 name=list(bytes(collection.name[0:27] + ".njm", "ascii")),
-                compressed_size=U32(compressed_size),
-                decompressed_size=U32(chunks_size_sum),
-                textures_compressed_size=U32(0),
-                textures_decompressed_size=U32(0))
+                compressed_size=compressed_size,
+                decompressed_size=chunks_size_sum,
+                textures_compressed_size=0,
+                textures_decompressed_size=0)
             _ = file_desc.serialize_into(bml_buf)
     
     # Add padding after file descriptions

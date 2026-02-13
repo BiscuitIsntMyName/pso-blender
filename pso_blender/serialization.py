@@ -2,8 +2,7 @@ from collections.abc import Buffer, Callable, Sequence
 from inspect import isclass
 import sys
 from dataclasses import dataclass, field
-from types import FunctionType
-from typing import Any, NewType, Self, Sized, TypedDict, Unpack, cast, final, get_type_hints, get_args, get_origin, Annotated, override
+from typing import Any, Self, Sized, TypedDict, Unpack, cast, final, get_type_hints, get_args, get_origin, Annotated, override
 from struct import pack_into, unpack_from, error as StructError, calcsize
 from warnings import warn
 from operator import itemgetter
@@ -14,8 +13,7 @@ def typehint_of_name(name: str, ns: Any=sys.modules[__name__]):
     return get_type_hints(ns).get(name)
 
 
-def FixedArray(tp: type, length: int) -> FunctionType:
-    return NewType("FixedArray", Annotated[tp, length])  # pyright: ignore[reportGeneralTypeIssues]
+type FixedArray[T, L] = Annotated[list[T], L]
 
 
 @dataclass
@@ -24,14 +22,14 @@ class Numeric:
     """Contains numeric types"""
     NULLPTR: int = 0
 
-    U8 = NewType("U8", int)
-    U16 = NewType("U16", int)
-    U32 = NewType("U32", int)
-    I8 = NewType("I8", int)
-    I16 = NewType("I16", int)
-    I32 = NewType("I32", int)
-    F32 = NewType("F32", float)
-    Ptr32 = NewType("Ptr32", int)
+    type U8 = int
+    type U16 = int
+    type U32 = int
+    type I8 = int
+    type I16 = int
+    type I32 = int
+    type F32 = float
+    type Ptr32 = int
 
     type_fmt = {
         "U8": "B",
@@ -252,7 +250,11 @@ class Serializable:
             elem_types = tuple()
             # Need to get typehint to get the element type
             if type_exists and is_fixed_array:
-                (elem_type, expected_length) = get_args(tp.__supertype__)  # pyright: ignore[reportUnknownMemberType]
+                fixarr_params = get_args(tp) # Unwrap Annotated
+                elem_type = fixarr_params[0]
+                expected_length = cast(int, fixarr_params[1])
+                if hasattr(expected_length, "__origin__"): # Unwrap Literal
+                    expected_length = cast(int, get_args(expected_length)[0])
                 elem_types = (elem_type, ) * expected_length
                 length = expected_length
                 if is_list:
@@ -261,7 +263,9 @@ class Serializable:
                         value = value_as_sized[:expected_length]
                     elif len(value_as_sized) < expected_length:
                         # Pad with zeros
-                        value += [0] * (expected_length - len(value_as_sized))
+                        value_as_list = cast(list[int], value)
+                        padding = [0] * (expected_length - len(value_as_sized))
+                        value_as_list += padding
             elif name is not None:
                 container_type = typehint_of_name(name, cls)
                 elem_types = get_args(container_type)
@@ -336,7 +340,7 @@ class Serializable:
             offset_after = buf.offset + self.instance_size()
             if offset_after % alignment != 0:
                 padding = ((offset_after // alignment) + 1) * alignment - offset_after
-                item = AlignmentHelper(wrapped=self, padding=[Numeric.U8(0)] * padding)
+                item = AlignmentHelper(wrapped=self, padding=[0] * padding)
         ctx = {"first_offset": None, "buf": buf}
         _ = self._visit(item, ctx, Serializable._serializer_visitor)
         first_offset = cast(int | None, ctx["first_offset"])
@@ -394,8 +398,8 @@ class AlignedString(Serializable):
 
     def __init__(self, s: str, alignment: int):
         super().__init__()
-        self.chars = [Numeric.U8(x) for x in str.encode(s)]
-        self.chars.append(Numeric.U8(0)) # Null terminator
+        self.chars = [x for x in str.encode(s)]
+        self.chars.append(0) # Null terminator
         self._alignment = alignment
 
     @override

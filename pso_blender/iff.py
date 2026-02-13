@@ -1,4 +1,4 @@
-from typing import cast, final, override
+from typing import Literal, cast, final, override
 from warnings import warn
 from struct import pack_into, unpack_from
 from dataclasses import dataclass, field
@@ -19,7 +19,7 @@ NULLPTR = Numeric.NULLPTR
 
 @dataclass
 class IffHeader(Serializable):
-    type_name: FixedArray(U8, 4) = field(default_factory=list)
+    type_name: FixedArray[U8, Literal[4]] = field(default_factory=list)
     body_size: U32 = 0
 
 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Literal, cast
 import unittest
 from pso_blender.serialization import Serializable, Numeric, ResizableBuffer, FixedArray
 
@@ -50,7 +50,7 @@ class MyBufferStruct(Serializable):
 
 @dataclass
 class MyFixedArrayStruct(Serializable):
-    name: FixedArray(U8, 16) = field(default_factory=list)
+    name: FixedArray[U8, Literal[16]] = field(default_factory=list)
     flags: U32 = 0
 
 
