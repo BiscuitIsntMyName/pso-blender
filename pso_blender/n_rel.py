@@ -3,15 +3,13 @@ from typing import Literal, cast, final, override
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
-from struct import unpack_from
 import bpy.types
 
 from .njcm_node_properties_menu import ObjectWithNjcmSettings
 from .rel_properties_menu import ObjectWithRelSettings
 from .rel import Rel
-from .serialization import Serializable, Numeric, AlignedString, FixedArray
+from .serialization import Serializable, Numeric, AlignedString, FixedArray, Ptr32
 from . import util, xvm, xj, tam
-from .njcm import MeshTreeNode
 from .njtl import TextureList, TextureListEntry
 
 
@@ -22,7 +20,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
@@ -48,9 +45,9 @@ class TextureAnimationInfo(Serializable):
 
 @dataclass
 class MeshTree(Serializable):
-    root_node: Ptr32 = NULLPTR # MeshTreeNode
+    root_node: Ptr32[xj.XjMeshTreeNode] = Ptr32(NULLPTR)
     unk1: U32 = 0 # Has somethign to do with UV animations
-    texture_animation_info: Ptr32 = NULLPTR # TextureAnimationInfo
+    texture_animation_info: Ptr32[TextureAnimationInfo] = Ptr32(NULLPTR)
     tree_flags: U32 = 0
 
 
@@ -65,8 +62,8 @@ class Chunk(Serializable):
     rot_y: I32 = 0
     rot_z: I32 = 0
     radius: F32 = 0.0
-    static_mesh_trees: Ptr32 = NULLPTR # MeshTree
-    animated_mesh_trees: Ptr32 = NULLPTR # Unknown
+    static_mesh_trees: Ptr32[MeshTree] = Ptr32(NULLPTR)
+    animated_mesh_trees: Ptr32[MeshTree] = Ptr32(NULLPTR)
     static_mesh_tree_count: U32 = 0
     animated_mesh_tree_count: U32 = 0
     flags: U32 = 0
@@ -87,8 +84,8 @@ class NrelFmt2(Serializable):
     chunk_count: U16 = 0
     unk2: U16 = 0
     radius: F32 = 0.0 # Overwritten at runtime
-    chunks: Ptr32 = NULLPTR # Chunk
-    texture_data: Ptr32 = NULLPTR # TextureList
+    chunks: Ptr32[Chunk] = Ptr32(NULLPTR)
+    texture_data: Ptr32[TextureList] = Ptr32(NULLPTR)
 
 
 class NrelError(Exception):
@@ -259,23 +256,23 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
 
             if anim_tex:
                 # Just use the texture id as the animation id
-                static_mesh_tree.texture_animation_info = rel.write(
-                    TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff))
+                static_mesh_tree.texture_animation_info = Ptr32(rel.write(
+                    TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff)))
             
             eval_flags = 0
             for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
                 eval_flags |= int(x)
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
-            mesh_node = MeshTreeNode(
+            mesh_node = xj.XjMeshTreeNode(
                 eval_flags=eval_flags,
                 # Make coords relative to chunk
                 x=mesh_world_pos.x - chunk_world_pos.x,
                 y=mesh_world_pos.y - chunk_world_pos.y,
                 z=mesh_world_pos.z - chunk_world_pos.z)
             mesh = xj.make_mesh(rel, obj, blender_mesh, texture_man)
-            mesh_node.mesh = rel.write(mesh)
-            static_mesh_tree.root_node = rel.write(mesh_node)
+            mesh_node.mesh = Ptr32(rel.write(mesh))
+            static_mesh_tree.root_node = Ptr32(rel.write(mesh_node))
             static_mesh_trees.append(static_mesh_tree)
             obj.to_mesh_clear() # Delete temporary mesh
         # Write mesh trees back to back
@@ -284,14 +281,14 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
             ptr = rel.write(tree)
             if first_static_mesh_tree_ptr == NULLPTR:
                 first_static_mesh_tree_ptr = ptr
-        chunk.static_mesh_trees = first_static_mesh_tree_ptr
+        chunk.static_mesh_trees = Ptr32(first_static_mesh_tree_ptr)
     # Write chunks back to back
     first_chunk_ptr = NULLPTR
     for chunk in chunk_to_children:
         ptr = rel.write(chunk)
         if first_chunk_ptr == NULLPTR:
             first_chunk_ptr = ptr
-    nrel.chunks = first_chunk_ptr
+    nrel.chunks = Ptr32(first_chunk_ptr)
     # Texture metadata
     textures = texture_man.get_all_textures()
     if len(textures) > 0:
@@ -300,11 +297,11 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
         for tex in textures:
             tex_name = tex.image.name[0:10]
             name_ptr = rel.write(AlignedString(tex_name, Rel.ALIGNMENT))
-            ptr = rel.write(TextureListEntry(name=name_ptr))
+            ptr = rel.write(TextureListEntry(name=Ptr32(name_ptr)))
             if first_texlist_entry_ptr == NULLPTR:
                 first_texlist_entry_ptr = ptr
-        texlist.elements = first_texlist_entry_ptr
-        nrel.texture_data = rel.write(texlist)
+        texlist.elements = Ptr32(first_texlist_entry_ptr)
+        nrel.texture_data = Ptr32(rel.write(texlist))
     # Write files
     file_contents = rel.finish(rel.write(nrel))
     with open(nrel_path, "wb") as f:
@@ -315,7 +312,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
         tam.write(tam_path, texture_man, objects)
 
 
-def read(path: str) -> NrelFmt2:
+def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
     with open(path, "rb") as f:
         rel = Rel.read_from(bytearray(f.read()))
     if rel.payload_offset is None:
@@ -330,37 +327,13 @@ def read(path: str) -> NrelFmt2:
         pass
     else:
         raise Exception("Unknown n.rel format '{}'".format(fmt_magic))
-    
-    chunks = Chunk.read_sequence(rel.buf.buffer, nrel.chunks, nrel.chunk_count)
-    nrel.chunks = chunks
 
-    for chunk in chunks:
-        static_trees = MeshTree.read_sequence(rel.buf.buffer, chunk.static_mesh_trees, chunk.static_mesh_tree_count)
-        anim_trees = MeshTree.read_sequence(rel.buf.buffer, chunk.animated_mesh_trees, chunk.animated_mesh_tree_count)
-
-        chunk.static_mesh_trees = static_trees
-        chunk.animated_mesh_trees = anim_trees
-
-        for tree in static_trees:
-            if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE and tree.root_node != NULLPTR:
-                # Resolve first pointer of double pointer
-                fmt = cast(str, Numeric.format_of_type(Ptr32))
-                tree.root_node = cast(tuple[int], unpack_from(fmt, rel.buf.buffer, tree.root_node))[0]
-                tree.tree_flags &= ~MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE
-
-            (root_node, _) = MeshTreeNode.read_tree(xj.Mesh, rel.buf.buffer, tree.root_node)
-            tree.root_node = root_node
-
-    return nrel
-
-
-def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
-    collection = bpy.data.collections.new(name)
+    collection = bpy.data.collections.new(path)
     world_scale = util.get_pso_world_scale()
 
     chunk_markers = bpy.data.collections.new("chunk_markers")
     collection.children.link(chunk_markers)
-    for chunk in nrel.chunks:
+    for chunk in nrel.chunks.deref_array(nrel.chunk_count):
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
         chunk_coll["chunk_offset"] = hex(chunk.get_offset())
@@ -382,8 +355,12 @@ def to_blender(name: str, nrel: NrelFmt2, nrel_xvm: xvm.Xvm | None) -> bpy.types
         chunk_markers.objects.link(obj)
 
         tree_counter = 0
-        for tree in chunk.static_mesh_trees:
-            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), tree.root_node, nrel_xvm)
+        for tree in chunk.static_mesh_trees.deref_array(chunk.static_mesh_tree_count):
+            if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE:
+                ptr = Ptr32[U32](int(tree.root_node))
+                tree.root_node = Ptr32(ptr.deref())
+            root_node = tree.root_node.deref()
+            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), root_node, nrel_xvm)
             for obj in models.objects:
                 if not obj.parent:
                     obj["tree_offset"] = hex(tree.get_offset())

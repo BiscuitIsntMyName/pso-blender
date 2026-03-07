@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 from typing import Any, Self, Sized, TypedDict, Unpack, cast, final, get_type_hints, get_args, get_origin, Annotated, override
 from struct import pack_into, unpack_from, error as StructError, calcsize
 from warnings import warn
-from operator import itemgetter
 
 
 def typehint_of_name(name: str, ns: Any=sys.modules[__name__]):
@@ -29,7 +28,6 @@ class Numeric:
     type I16 = int
     type I32 = int
     type F32 = float
-    type Ptr32 = int
 
     type_fmt = {
         "U8": "B",
@@ -132,10 +130,8 @@ class ResizableBuffer:
 
 
 class Serializable:
-    _offset: int
-
-    def __init__(self):
-        self._offset = -1
+    _offset: int = -1
+    _src_buf: Buffer | None = None
 
     @classmethod
     def format_of_member(cls, member: str) -> str | None:
@@ -178,7 +174,7 @@ class Serializable:
         _ = self._visit(self, ctx, Serializable._member_visitor)
         return [
             visit_result.offset for visit_result in members
-            if visit_result.tp is not None and visit_result.tp is Numeric.Ptr32 and visit_result.value != Numeric.NULLPTR
+            if visit_result.tp is not None and (visit_result.tp is Ptr32 or get_origin(visit_result.tp) is Ptr32) and int(visit_result.value) != Numeric.NULLPTR
         ]
     
     @classmethod
@@ -218,6 +214,8 @@ class Serializable:
             return True
         # Is an instance of Serializable?
         if isinstance(value, Serializable):
+            if isinstance(value, Ptr32):
+                return visitor(value=value, name=name, tp=tp, fmt=Numeric.format_of_type(Ptr32), ctx=ctx)
             should_continue = True
             members = value.__dict__
             for member_name in members:
@@ -227,17 +225,20 @@ class Serializable:
                 if not should_continue:
                     break
             return should_continue
-        # Is a class object?
-        if type(value) is type and issubclass(value, Serializable):
-            should_continue = True
-            members = value.__annotations__
-            for member_name in members:
-                member_value = members[member_name]
-                member_type = member_value
-                should_continue = value._visit(member_value, ctx, visitor, name=member_name, tp=member_type)
-                if not should_continue:
-                    break
-            return should_continue
+        if type(value) is type:
+            if issubclass(value, Ptr32):
+                return visitor(value=value, name=name, tp=tp, fmt=Numeric.format_of_type(Ptr32), ctx=ctx)
+            # Is a class object?
+            elif issubclass(value, Serializable):
+                should_continue = True
+                members = get_type_hints(value, include_extras=True)
+                for member_name in members:
+                    member_value = members[member_name]
+                    member_type = member_value
+                    should_continue = value._visit(member_value, ctx, visitor, name=member_name, tp=member_type)
+                    if not should_continue:
+                        break
+                return should_continue
         # Is list-like?
         value_as_sized = cast(Sized, value)
         is_list = type(value_as_sized) is list
@@ -347,16 +348,26 @@ class Serializable:
         if first_offset is None:
             raise Exception("Serialization error: Did not write anything")
         return first_offset
-    
-    def _deserializer_visitor(**kwargs) -> bool:
-        (name, ctx, fmt) = itemgetter("name", "ctx", "fmt")(kwargs)
+
+    @staticmethod
+    def _deserializer_visitor(**kwargs: Unpack[VisitorArguments]) -> bool:
+        name = kwargs["name"]
+        ctx = kwargs["ctx"]
+        fmt = kwargs["fmt"]
+        tp = kwargs["tp"]
         if fmt:
             sz = Numeric.size_of_format(fmt)
-            (value, ) = unpack_from(fmt, ctx["buf"], ctx["offset"])
-            if type(ctx["result"].__dict__[name]) is list:
-                ctx["result"].__dict__[name].append(value)
+            (deserialized, ) = unpack_from(fmt, ctx["buf"], ctx["offset"])
+            if get_origin(tp) is Ptr32:
+                pointee_type = get_args(tp)[0]
+                ptr = Ptr32[pointee_type](deserialized)
+                ptr.set_target_type(pointee_type)
+                ptr.set_src_buf(ctx["buf"])
+                ctx["result"].__dict__[name] = ptr
+            elif type(ctx["result"].__dict__[name]) is list:
+                ctx["result"].__dict__[name].append(deserialized)
             else:
-                ctx["result"].__dict__[name] = value
+                ctx["result"].__dict__[name] = deserialized
             ctx["offset"] += sz
         return True
     
@@ -365,6 +376,7 @@ class Serializable:
         """Assumes class has default constructor"""
         result = cls() # Default construct
         result._offset = offset
+        result._src_buf = buf
         ctx = {"result": result, "offset": offset, "buf": buf}
         _ = cls._visit(cls, ctx, Serializable._deserializer_visitor)
         offset = cast(int, ctx["offset"])
@@ -405,3 +417,55 @@ class AlignedString(Serializable):
     @override
     def serialize_into(self, buf: ResizableBuffer, _unused: int | None=None):  # pyright: ignore[reportIncompatibleMethodOverride]
         return super().serialize_into(buf, self._alignment)
+
+
+class Ptr32[T: Serializable | int | float](int, Serializable):
+    _src_buf: Buffer | None = None
+    _target_type: type[T] | None = None
+    _result_cache: T | None = None
+    _arr_result_cache: list[T] | None = None
+
+    def set_src_buf(self, buf: Buffer):
+        self._src_buf = buf
+
+    def set_target_type(self, tp: type[T]):
+        self._target_type = tp
+
+    def deref(self) -> T:
+        if self._result_cache is not None:
+            return self._result_cache
+        if self._target_type is None:
+            raise TypeError("Pointer has no target type")
+        if self._src_buf is None:
+            raise TypeError("Pointer has no source buffer")
+        if issubclass(self._target_type, Serializable):
+            result = self._target_type.deserialize_from(self._src_buf, int(self))[0]
+        else:
+            fmt = Numeric.format_of_type(self._target_type)
+            assert(fmt)
+            result = cast(tuple[T], unpack_from(fmt, self._src_buf, int(self)))[0]
+        self._result_cache = result
+        return result
+
+    def deref_array(self, count: int) -> list[T]:
+        if self._arr_result_cache is not None:
+            return self._arr_result_cache
+        if self._target_type is None:
+            raise TypeError("Pointer has no target type")
+        if self._src_buf is None:
+            raise TypeError("Pointer has no source buffer")
+        if isclass(self._target_type) and issubclass(self._target_type, Serializable):
+            result = self._target_type.read_sequence(self._src_buf, int(self), count)
+        else:
+            fmt = Numeric.format_of_type(self._target_type, count)
+            assert(fmt)
+            result = list(cast(tuple[T, ...], unpack_from(fmt, self._src_buf, int(self))))
+        self._arr_result_cache = result
+        return result
+
+    def retype[X: Serializable | int | float](self, new_type: type[X]) -> "Ptr32[X]":
+        new_ptr = Ptr32[new_type](int(self))
+        new_ptr.set_target_type(new_type)
+        if self._src_buf is not None:
+            new_ptr.set_src_buf(self._src_buf)
+        return new_ptr

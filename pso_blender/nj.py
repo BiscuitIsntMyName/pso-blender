@@ -4,7 +4,7 @@ import bpy, warnings
 from dataclasses import dataclass, field
 
 from bpy.types import Collection
-from .serialization import Serializable, Numeric
+from .serialization import Serializable, Numeric, Ptr32
 from .njcm import MeshTreeNode
 
 
@@ -15,7 +15,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
@@ -56,8 +55,8 @@ class IndexListNode(Serializable):
 
 @dataclass
 class Mesh(Serializable):
-    vertex_list: Ptr32 = NULLPTR # VertexListNode
-    index_list: Ptr32 = NULLPTR # IndexListNode
+    vertex_list: Ptr32[VertexListNode] = Ptr32(NULLPTR)
+    index_list: Ptr32[IndexListNode] = Ptr32(NULLPTR)
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0

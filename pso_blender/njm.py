@@ -5,7 +5,7 @@ from struct import pack_into
 from dataclasses import dataclass
 
 from mathutils import Vector
-from .serialization import Serializable, Numeric
+from .serialization import Serializable, Numeric, Ptr32
 from .iff import IffHeader, IffChunk
 from . import util
 
@@ -17,7 +17,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
@@ -39,9 +38,9 @@ class KeyframeI(Serializable):
 
 @dataclass
 class MData3(Serializable):
-    translations: Ptr32 = NULLPTR # KeyframeF
-    rotations: Ptr32 = NULLPTR # KeyframeI
-    scalings: Ptr32 = NULLPTR # KeyframeF
+    translations: Ptr32[KeyframeF] = Ptr32(NULLPTR)
+    rotations: Ptr32[KeyframeI] = Ptr32(NULLPTR)
+    scalings: Ptr32[KeyframeF] = Ptr32(NULLPTR)
     translation_count: U32 = 0
     rotation_count: U32 = 0
     scaling_count: U32 = 0
@@ -68,7 +67,7 @@ class MotionFlag:
 
 @dataclass
 class Motion(Serializable):
-    nodes_to_keyframes: Ptr32 = NULLPTR # Array of MData in iteration order of model nodes (depth first). Each model node will use the corresponding keyframes from this array.
+    nodes_to_keyframes: Ptr32[MData3] = Ptr32(NULLPTR) # Array of MData in iteration order of model nodes (depth first). Each model node will use the corresponding keyframes from this array.
     frame_count: U32 = 0
     motion_flags: U16 = 0 # MotionFlag
     factor_count: U16 = 0 # Also contains some other flags
@@ -105,7 +104,7 @@ def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearra
     # Create chunk
     nmdm_chunk = IffChunk("NMDM")
     motion = Motion(
-        nodes_to_keyframes=0xdeadbeef,
+        nodes_to_keyframes=Ptr32(0xdeadbeef),
         frame_count=int(action.frame_range[1] - action.frame_range[0]),
         motion_flags=MotionFlag.NJD_MTYPE_POS_0 | MotionFlag.NJD_MTYPE_ANG_1 | MotionFlag.NJD_MTYPE_SCL_2,
         factor_count=3)
@@ -153,9 +152,9 @@ def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearra
                 first_scale_ptr = ptr
         # Finish mdata for this node
         mdatas.append(MData3(
-            translations=first_trans_ptr,
-            rotations=first_rot_ptr,
-            scalings=first_scale_ptr,
+            translations=Ptr32(first_trans_ptr),
+            rotations=Ptr32(first_rot_ptr),
+            scalings=Ptr32(first_scale_ptr),
             translation_count=len(translations),
             rotation_count=len(rotations),
             scaling_count=len(scalings)))

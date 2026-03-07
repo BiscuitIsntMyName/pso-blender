@@ -13,7 +13,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 

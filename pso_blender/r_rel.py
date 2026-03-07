@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import cast
 import bpy.types
 from .rel import Rel
-from .serialization import Serializable, Numeric
+from .serialization import Serializable, Numeric, Ptr32
 from . import util, tristrip
 from .nj import (
     Vertex,
@@ -20,14 +20,13 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
 @dataclass
 class MeshContainer(Serializable):
     unk1: U32 = 0
-    mesh: Ptr32 = NULLPTR # Mesh
+    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
 
 
 @dataclass
@@ -42,12 +41,12 @@ class Room(Serializable):
     rot_z: I32 = 0
     color_alpha: F32 = 0.0
     discovery_radius: F32 = 0.0
-    mesh_container: Ptr32 = NULLPTR # MeshContainer
+    mesh_container: Ptr32[MeshContainer] = Ptr32(NULLPTR)
 
 
 @dataclass
 class Minimap(Serializable):
-    rooms: Ptr32 = NULLPTR # Room
+    rooms: Ptr32[Room] = Ptr32(NULLPTR)
     unk1: U32 = 0 # Maybe textures
     room_count: U32 = 0
     unk2: U32 = 0
@@ -127,10 +126,10 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         mesh.index_list = index_node_ptr
         mesh_ptr = rel.write(mesh)
 
-        container.mesh = mesh_ptr
+        container.mesh = Ptr32(mesh_ptr)
         container_ptr = rel.write(container)
 
-        room.mesh_container = container_ptr
+        room.mesh_container = Ptr32(container_ptr)
         rooms.append(room)
 
         obj.to_mesh_clear() # Delete temporary mesh
@@ -141,7 +140,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         if first_room_ptr is None:
             first_room_ptr = room_ptr
     if first_room_ptr is not None:
-        minimap.rooms = first_room_ptr
+        minimap.rooms = Ptr32(first_room_ptr)
     minimap_ptr = rel.write(minimap)
     file_contents = rel.finish(minimap_ptr)
     with open(path, "wb") as f:

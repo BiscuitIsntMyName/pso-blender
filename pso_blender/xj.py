@@ -1,5 +1,5 @@
-from collections.abc import Buffer
-from typing import cast, final, override
+from collections.abc import Callable
+from typing import ClassVar, TypeGuard, cast, final
 import bpy, os, bmesh
 from dataclasses import dataclass, field
 
@@ -8,8 +8,8 @@ from bpy.types import Collection, FloatColorAttribute, Material
 from .njcm_node_properties_menu import ObjectWithNjcmSettings
 from .rel_properties_menu import ObjectWithRelSettings
 from .xj_material_properties_menu import MaterialWithXjSettings
-from .serialization import Serializable, Numeric, AlignedString
-from struct import unpack_from, pack_into
+from .serialization import Serializable, Numeric, AlignedString, Ptr32
+from struct import pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
 from . import tristrip, util, xvm
 from .iff import IffHeader, IffChunk, parse_pof0
@@ -23,24 +23,129 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
-def vertex_has_color(fmt: int) -> bool:
+def vertex_fmt_has_pos(fmt: int) -> bool:  # pyright: ignore[reportUnusedParameter]
+    return True
+
+def vertex_fmt_has_color(fmt: int) -> bool:
     fmt = fmt & 0xffff
     return fmt == 4 or fmt == 5 or fmt == 6 or fmt == 7
 
-def vertex_has_normals(fmt: int) -> bool:
+def vertex_fmt_has_normals(fmt: int) -> bool:
     fmt = fmt & 0xffff
     return fmt == 2 or fmt == 3 or fmt == 6 or fmt == 7
 
-def vertex_has_uvs(fmt: int) -> bool:
+def vertex_fmt_has_uvs(fmt: int) -> bool:
     fmt = fmt & 0xffff
     return fmt == 1 or fmt == 3 or fmt == 5 or fmt == 7
 
+
 @dataclass
-class VertexFormat1(Serializable):
+class VertexBase(Serializable):
+    _fmt: ClassVar[int] = -1
+
+    @classmethod
+    def get_fmt(cls) -> int:
+        return cls._fmt
+
+    @classmethod
+    def has_pos(cls) -> bool:
+        return vertex_fmt_has_pos(cls._fmt)
+
+    @classmethod
+    def has_color(cls) -> bool:
+        return vertex_fmt_has_color(cls._fmt)
+
+    @classmethod
+    def has_normals(cls) -> bool:
+        return vertex_fmt_has_normals(cls._fmt)
+
+    @classmethod
+    def has_uvs(cls) -> bool:
+        return vertex_fmt_has_uvs(cls._fmt)
+
+
+@dataclass
+class VertexWithPos(VertexBase):
+    x: F32 = 0.0
+    y: F32 = 0.0
+    z: F32 = 0.0
+
+    def get_pos(self) -> tuple[F32, F32, F32]:
+        return (self.x, self.x, self.y)
+    
+    def set_pos(self, pos: tuple[F32, F32, F32]):
+        self.x = pos[0]
+        self.y = pos[1]
+        self.z = pos[2]
+
+
+@dataclass
+class VertexWithUv(VertexBase):
+    u: F32 = 0.0
+    v: F32 = 0.0
+
+    def get_uv(self) -> tuple[F32, F32]:
+        return (self.u, self.v)
+    
+    def set_uv(self, uv: tuple[F32, F32]):
+        self.u = uv[0]
+        self.v = uv[1]
+
+
+@dataclass
+class VertexWithColor(VertexBase):
+    r: U8 = 0
+    g: U8 = 0
+    b: U8 = 0
+    a: U8 = 0
+
+    def get_color(self) -> tuple[U8, U8, U8, U8]:
+        return (self.r, self.g, self.b, self.a)
+    
+    def set_color(self, color: tuple[U8, U8, U8, U8]):
+        self.r = color[0]
+        self.g = color[1]
+        self.b = color[2]
+        self.a = color[3]
+
+
+@dataclass
+class VertexWithNormal(VertexBase):
+    nx: F32 = 0.0
+    ny: F32 = 0.0
+    nz: F32 = 0.0
+
+    def get_normal(self) -> tuple[F32, F32, F32]:
+        return (self.nx, self.nx, self.ny)
+    
+    def set_normal(self, n: tuple[F32, F32, F32]):
+        self.nx = n[0]
+        self.ny = n[1]
+        self.nz = n[2]
+
+
+def vertex_has_pos(v: VertexBase) -> TypeGuard[VertexWithPos]:
+    return v.has_pos()
+
+
+def vertex_has_uvs(v: VertexBase) -> TypeGuard[VertexWithUv]:
+    return v.has_uvs()
+
+
+def vertex_has_color(v: VertexBase) -> TypeGuard[VertexWithColor]:
+    return v.has_color()
+
+
+def vertex_has_normals(v: VertexBase) -> TypeGuard[VertexWithNormal]:
+    return v.has_normals()
+
+
+@dataclass
+class VertexFormat1(VertexWithUv, VertexWithPos): # Inheritance order is important for correct field order
+    _fmt: ClassVar[int] = 1
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -49,7 +154,8 @@ class VertexFormat1(Serializable):
 
 
 @dataclass
-class VertexFormat2(Serializable):
+class VertexFormat2(VertexWithNormal, VertexWithPos):
+    _fmt: ClassVar[int] = 2
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -59,7 +165,8 @@ class VertexFormat2(Serializable):
 
 
 @dataclass
-class VertexFormat3(Serializable):
+class VertexFormat3(VertexWithUv, VertexWithNormal, VertexWithPos):
+    _fmt: ClassVar[int] = 3
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -71,7 +178,8 @@ class VertexFormat3(Serializable):
 
 
 @dataclass
-class VertexFormat4(Serializable):
+class VertexFormat4(VertexWithColor, VertexWithPos):
+    _fmt: ClassVar[int] = 4
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -83,7 +191,8 @@ class VertexFormat4(Serializable):
 
 
 @dataclass
-class VertexFormat5(Serializable):
+class VertexFormat5(VertexWithUv, VertexWithColor, VertexWithPos):
+    _fmt: ClassVar[int] = 5
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -97,7 +206,8 @@ class VertexFormat5(Serializable):
 
 
 @dataclass
-class VertexFormat6(Serializable):
+class VertexFormat6(VertexWithNormal, VertexWithColor, VertexWithPos):
+    _fmt: ClassVar[int] = 6
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -111,7 +221,8 @@ class VertexFormat6(Serializable):
 
 
 @dataclass
-class VertexFormat7(Serializable):
+class VertexFormat7(VertexWithUv, VertexWithColor, VertexWithNormal, VertexWithPos):
+    _fmt: ClassVar[int] = 7
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -125,77 +236,14 @@ class VertexFormat7(Serializable):
     a: U8 = 0xff
     u: F32 = 0.0
     v: F32 = 0.0
-
-
-@dataclass
-class VertexBufferFormat1(Serializable):
-    vertices: list[VertexFormat1] = field(default_factory=list)
-
-@dataclass
-class VertexBufferFormat2(Serializable):
-    vertices: list[VertexFormat2] = field(default_factory=list)
-
-
-@dataclass
-class VertexBufferFormat3(Serializable):
-    vertices: list[VertexFormat3] = field(default_factory=list)
-
-
-@dataclass
-class VertexBufferFormat4(Serializable):
-    vertices: list[VertexFormat4] = field(default_factory=list)
-
-
-@dataclass
-class VertexBufferFormat5(Serializable):
-    vertices: list[VertexFormat5] = field(default_factory=list)
-
-
-@dataclass
-class VertexBufferFormat6(Serializable):
-    vertices: list[VertexFormat6] = field(default_factory=list)
-
-
-@dataclass
-class VertexBufferFormat7(Serializable):
-    vertices: list[VertexFormat7] = field(default_factory=list)
-
-
-@dataclass
-class IndexBuffer(Serializable):
-    indices: list[U16] = field(default_factory=list)
 
 
 @dataclass
 class VertexBufferContainer(Serializable):
     vertex_format: U32 = 0
-    vertex_buffer: Ptr32 = NULLPTR # VertexBuffer
+    vertices: Ptr32[VertexBase] = Ptr32(NULLPTR)
     vertex_size: U32 = 0
     vertex_count: U32 = 0
-
-    @classmethod
-    @override
-    def deserialize_from(cls, buf: Buffer, offset: int=0):
-        (container, after) = super(VertexBufferContainer, cls).deserialize_from(buf, offset)
-        vertex_format = container.vertex_format & 0xffff
-        if vertex_format == 1:
-            vert_ctor = VertexFormat1
-        elif vertex_format == 2:
-            vert_ctor = VertexFormat2
-        elif vertex_format == 3:
-            vert_ctor = VertexFormat3
-        elif vertex_format == 4:
-            vert_ctor = VertexFormat4
-        elif vertex_format == 5:
-            vert_ctor = VertexFormat5
-        elif vertex_format == 6:
-            vert_ctor = VertexFormat6
-        elif vertex_format == 7:
-            vert_ctor = VertexFormat7
-        else:
-            raise Exception("Unimplemented vertex format {}".format(container.vertex_format))
-        container.vertex_buffer = vert_ctor.read_sequence(buf, container.vertex_buffer, container.vertex_count)
-        return (container, after)
 
 
 @dataclass
@@ -252,42 +300,39 @@ class RenderStateArgs(Serializable):
     unk2: U32 = 0
 
 
+# Helper class for writing array, not needed for reading
+@dataclass
+class IndexBuffer(Serializable):
+    indices: list[U16] = field(default_factory=list)
+
+
 @dataclass
 class IndexBufferContainer(Serializable):
-    renderstate_args: Ptr32 = NULLPTR # RenderStateArgs
+    renderstate_args: Ptr32[RenderStateArgs] = Ptr32(NULLPTR)
     renderstate_args_count: U32 = 0
-    index_buffer: Ptr32 = NULLPTR # IndexBuffer
+    indices: Ptr32[U16] = Ptr32(NULLPTR)
     index_count: U32 = 0
     vertex_buffer_index: U32 = 0
-
-    @classmethod
-    @override
-    def deserialize_from(cls, buf: Buffer, offset: int=0):
-        (container, after) = super(IndexBufferContainer, cls).deserialize_from(buf, offset)
-        container.renderstate_args = RenderStateArgs.read_sequence(buf, container.renderstate_args, container.renderstate_args_count)
-        fmt = cast(str, Numeric.format_of_type(U16, container.index_count))
-        container.index_buffer = cast(tuple[int, ...], unpack_from(fmt, buf, offset=container.index_buffer))
-        return (container, after)
 
 
 @dataclass
 class Mesh(Serializable):
     flags: U32 = 0
-    vertex_buffers: Ptr32 = NULLPTR # VertexBufferContainer
+    vertex_buffers: Ptr32[VertexBufferContainer] = Ptr32(NULLPTR)
     vertex_buffer_count: U32 = 0
-    index_buffers: Ptr32 = NULLPTR # IndexBufferContainer
+    index_buffers: Ptr32[IndexBufferContainer] = Ptr32(NULLPTR)
     index_buffer_count: U32 = 0
-    alpha_index_buffers: Ptr32 = NULLPTR # IndexBufferContainer
+    alpha_index_buffers: Ptr32[IndexBufferContainer] = Ptr32(NULLPTR)
     alpha_index_buffer_count: U32 = 0
 
-    @classmethod
-    @override
-    def deserialize_from(cls, buf: Buffer, offset: int=0):
-        (mesh, after) = super(Mesh, cls).deserialize_from(buf, offset=offset)
-        mesh.vertex_buffers = VertexBufferContainer.read_sequence(buf, mesh.vertex_buffers, mesh.vertex_buffer_count)
-        mesh.index_buffers = IndexBufferContainer.read_sequence(buf, mesh.index_buffers, mesh.index_buffer_count)
-        mesh.alpha_index_buffers = IndexBufferContainer.read_sequence(buf, mesh.alpha_index_buffers, mesh.alpha_index_buffer_count)
-        return (mesh, after)
+
+# Specialize node
+@final
+@dataclass
+class XjMeshTreeNode(MeshTreeNode[Mesh]):
+    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
+    child: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
+    next: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 @dataclass
@@ -297,56 +342,145 @@ class NormalType:
     Face = 2
 
 
-def determine_vertex_format(has_textures: bool, has_vertex_colors: bool, use_normals: bool):
+@dataclass
+class VertexAttributes:
+    x: float = 0.0
+    y: float = 0.0
+    z: float = 0.0
+    nx: float = 0.0
+    ny: float = 0.0
+    nz: float = 0.0
+    u: float = 0.0
+    v: float = 0.0
+    r: int = 0
+    g: int = 0
+    b: int = 0
+    a: int = 0
+
+
+def determine_vertex_format(has_textures: bool, has_vertex_colors: bool, use_normals: bool) -> int:
     # Figure out the right vertex format based on what data mesh has.
     if has_textures:
         if has_vertex_colors:
             if use_normals:
                 # Coords + Normals + color + UVs
-                vertex_format = 7
-                vertex_size = VertexFormat7.type_size()
-                vertex_buffer = VertexBufferFormat7()
-                vertex_ctor = VertexFormat7
+                return 7
             else:
                 # Coords + color + UVs
-                vertex_format = 5
-                vertex_size = VertexFormat5.type_size()
-                vertex_buffer = VertexBufferFormat5()
-                vertex_ctor = VertexFormat5
+                return 5
         else:
             if use_normals:
                 # Coords + normals + UVs
-                vertex_format = 3
-                vertex_size = VertexFormat3.type_size()
-                vertex_buffer = VertexBufferFormat3()
-                vertex_ctor = VertexFormat3
+                return 3
             else:
                 # Coords + UVs
-                vertex_format = 1
-                vertex_size = VertexFormat1.type_size()
-                vertex_buffer = VertexBufferFormat1()
-                vertex_ctor = VertexFormat1
+                return 1
     else:
         if use_normals:
             if has_vertex_colors:
                 # Coords + color + normals
-                vertex_format = 6
-                vertex_size = VertexFormat6.type_size()
-                vertex_buffer = VertexBufferFormat6()
-                vertex_ctor = VertexFormat6
+                return 6
             else:
                 # Coords + normals
-                vertex_format = 2
-                vertex_size = VertexFormat2.type_size()
-                vertex_buffer = VertexBufferFormat2()
-                vertex_ctor = VertexFormat2
+                return 2
         else:
             # Coords + color
-            vertex_format = 4
-            vertex_size = VertexFormat4.type_size()
-            vertex_buffer = VertexBufferFormat4()
-            vertex_ctor = VertexFormat4
-    return (vertex_format, vertex_size, vertex_buffer, vertex_ctor)
+            return 4
+
+
+def get_vertex_constructor(vertex_format: int):
+    ctors = [
+        VertexFormat1,
+        VertexFormat2,
+        VertexFormat3,
+        VertexFormat4,
+        VertexFormat5,
+        VertexFormat6,
+        VertexFormat7]
+    vertex_format = vertex_format & 0xffff
+    return ctors[vertex_format - 1]
+
+type VertexFactory =  Callable[[VertexAttributes],
+    VertexFormat1 |
+    VertexFormat2 |
+    VertexFormat3 |
+    VertexFormat4 |
+    VertexFormat5 |
+    VertexFormat6 |
+    VertexFormat7]
+
+
+def get_vertex_factory(vertex_format: int) -> VertexFactory:
+    factories: list[VertexFactory] = [
+        lambda attrs: VertexFormat1(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            u=attrs.u,
+            v=attrs.v),
+        lambda attrs: VertexFormat2(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            nx=attrs.nx,
+            ny=attrs.ny,
+            nz=attrs.nz),
+        lambda attrs: VertexFormat3(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            u=attrs.u,
+            v=attrs.v),
+        lambda attrs: VertexFormat4(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            r=attrs.r,
+            g=attrs.g,
+            b=attrs.b,
+            a=attrs.a),
+        lambda attrs: VertexFormat5(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            r=attrs.r,
+            g=attrs.g,
+            b=attrs.b,
+            a=attrs.a,
+            u=attrs.u,
+            v=attrs.v),
+        lambda attrs: VertexFormat6(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            nx=attrs.nx,
+            ny=attrs.ny,
+            nz=attrs.nz,
+            r=attrs.r,
+            g=attrs.g,
+            b=attrs.b,
+            a=attrs.a),
+        lambda attrs: VertexFormat7(
+            x=attrs.x,
+            y=attrs.y,
+            z=attrs.z,
+            nx=attrs.nx,
+            ny=attrs.ny,
+            nz=attrs.nz,
+            r=attrs.r,
+            g=attrs.g,
+            b=attrs.b,
+            a=attrs.a,
+            u=attrs.u,
+            v=attrs.v)]
+    vertex_format = vertex_format & 0xffff
+    return factories[vertex_format - 1]
+
+
+# Helper class for writing array, not needed for reading
+@dataclass
+class VertexBuffer(Serializable):
+    vertices: list[VertexBase] = field(default_factory=list)
 
 
 def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: Mesh, has_textures: bool, vertex_colors: bpy.types.FloatColorAttribute | None, normal_type: int | None):
@@ -354,30 +488,31 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
 
     # One vertex per loop
     # TODO: Should only use per-loop vertices when necessary
-    (vertex_format, vertex_size, vertex_buffer, vertex_ctor) = determine_vertex_format(has_textures, bool(vertex_colors), use_normals)
+    vertex_format = determine_vertex_format(has_textures, bool(vertex_colors), use_normals)
+    create_vertex = get_vertex_factory(vertex_format)
 
     if cast(ObjectWithRelSettings, obj).rel_settings.is_translucent:
         vertex_format |= 0x10000
 
-    vertex_buffer.vertices = [vertex_ctor()] * len(blender_mesh.loops)
+    vertices: list[VertexBase | None] = [None] * len(blender_mesh.loops)
     for face in blender_mesh.loop_triangles:
         for (vert_idx, loop_idx) in zip(face.vertices, face.loops):
+            # Gather all required and optional vertex attributes
+            vertex_attributes = VertexAttributes()
             # Exclude translation from transform
             local_vert = blender_mesh.vertices[vert_idx]
             world_vert = obj.matrix_world @ local_vert.co
             world_vert = local_vert.co.to_4d()
             world_vert.w = 0
             world_vert = util.from_blender_axes((obj.matrix_world @ world_vert).to_3d())
-            vertex = vertex_ctor(
-                x=world_vert[0],
-                y=world_vert[1],
-                z=world_vert[2])
-            vertex_buffer.vertices[loop_idx] = vertex
+            vertex_attributes.x = world_vert[0]
+            vertex_attributes.y = world_vert[1]
+            vertex_attributes.z = world_vert[2]
             # Get UVs
             if has_textures:
                 u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
-                vertex.u = u
-                vertex.v = v
+                vertex_attributes.u = u
+                vertex_attributes.v = v
             # Get colors
             if vertex_colors:
                 if vertex_colors.domain == "POINT":
@@ -388,27 +523,37 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
                     raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 # BGRA
                 # Need to clamp because light baking can cause values to go higher than normal
-                vertex.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
-                vertex.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
-                vertex.r = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
-                vertex.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
+                vertex_attributes.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
+                vertex_attributes.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
+                vertex_attributes.r = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
+                vertex_attributes.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
             if use_normals:
                 # Vertex or face normal
                 normal = local_vert.normal if normal_type == NormalType.Vertex else face.normal
                 normal = normal.to_4d()
                 normal.w = 0
                 normal = util.from_blender_axes((obj.matrix_world @ normal).to_3d().normalized())
-                vertex.nx = normal[0]
-                vertex.ny = normal[1]
-                vertex.nz = normal[2]
+                vertex_attributes.nx = normal[0]
+                vertex_attributes.ny = normal[1]
+                vertex_attributes.nz = normal[2]
+            # Construct actual vertex from attributes
+            vertices[loop_idx] = create_vertex(vertex_attributes)
+
+    vertex_buffer = VertexBuffer()
+    for vert in vertices:
+        if vert is None:
+            raise Exception("XJ error in object '{}': Loop-vertex mismatch".format(obj.name))
+        vertex_buffer.vertices.append(vert)
+    
+    vertex_size = cast(VertexBase, vertices[0]).type_size()
 
     # Put all vertices in one buffer
     xj_mesh.vertex_buffer_count = 1
-    xj_mesh.vertex_buffers = destination.write(VertexBufferContainer(
+    xj_mesh.vertex_buffers = Ptr32(destination.write(VertexBufferContainer(
         vertex_format=vertex_format,
-        vertex_buffer=destination.write(vertex_buffer),
+        vertices=Ptr32(destination.write(vertex_buffer)),
         vertex_size=vertex_size,
-        vertex_count=len(vertex_buffer.vertices)))
+        vertex_count=len(vertex_buffer.vertices))))
 
 
 class MaterialStrips:
@@ -487,9 +632,9 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             # Write Indices
             buf_ptr = destination.write(IndexBuffer(indices=strip), True)
             container = IndexBufferContainer(
-                index_buffer=buf_ptr,
+                indices=Ptr32(buf_ptr),
                 index_count=len(strip),
-                renderstate_args=first_rs_arg_ptr,
+                renderstate_args=Ptr32(first_rs_arg_ptr),
                 renderstate_args_count=rs_arg_count)
             if has_alpha:
                 alpha_index_buffer_containers.append(container)
@@ -507,9 +652,9 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
         if first_opaque_index_buffer_container_ptr == NULLPTR:
             first_opaque_index_buffer_container_ptr = ptr
     xj_mesh.alpha_index_buffer_count = len(alpha_index_buffer_containers)
-    xj_mesh.alpha_index_buffers = first_alpha_index_buffer_container_ptr
+    xj_mesh.alpha_index_buffers = Ptr32(first_alpha_index_buffer_container_ptr)
     xj_mesh.index_buffer_count = len(opaque_index_buffer_containers)
-    xj_mesh.index_buffers = first_opaque_index_buffer_container_ptr
+    xj_mesh.index_buffers = Ptr32(first_opaque_index_buffer_container_ptr)
 
 
 def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> Mesh:
@@ -673,7 +818,8 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         else:
             img = bpy.data.images[img_idx]
         if len(xvr.data) > 0:
-            img.pixels = xvr.data
+            # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
+            img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
 
     if mat.node_tree is None:
         raise Exception("XJ error in object '{}': Material has no node tree".format(name))
@@ -711,26 +857,27 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     return mat
 
 
-def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None) -> bpy.types.Object:
+def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
     # Group index buffers by their vertex buffer
     grouped_alpha_index_buffers: dict[int, list[IndexBufferContainer]] = {}
-    for index_buffer in node.mesh.alpha_index_buffers:
+    mesh = node.mesh.deref()
+    for index_buffer in mesh.alpha_index_buffers.deref_array(mesh.alpha_index_buffer_count):
         if index_buffer.vertex_buffer_index in grouped_alpha_index_buffers:
             grouped_alpha_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
         else:
             grouped_alpha_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
 
-    grouped_opaque_index_buffers = {}
-    for index_buffer in node.mesh.index_buffers:
+    grouped_opaque_index_buffers: dict[int, list[IndexBufferContainer]] = {}
+    for index_buffer in mesh.index_buffers.deref_array(mesh.index_buffer_count):
         if index_buffer.vertex_buffer_index in grouped_opaque_index_buffers:
             grouped_opaque_index_buffers[index_buffer.vertex_buffer_index].append(index_buffer)
         else:
             grouped_opaque_index_buffers[index_buffer.vertex_buffer_index] = [index_buffer]
     
     grouped_index_buffers = list(grouped_alpha_index_buffers.items()) + list(grouped_opaque_index_buffers.items())
-    all_index_buffers: list[IndexBufferContainer] = node.mesh.alpha_index_buffers + node.mesh.index_buffers
+    all_index_buffers: list[IndexBufferContainer] = mesh.alpha_index_buffers.deref_array(mesh.alpha_index_buffer_count) + mesh.index_buffers.deref_array(mesh.index_buffer_count)
 
     # Create one material for each index buffer
     index_buffer_materials: dict[int, tuple[int, Material]] = {}
@@ -738,7 +885,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     # To replicate this we need to create a settings object that is the accumulation of all the previous settings.
     accumulated_material_settings: list[RenderStateArgs] = []
     for i, index_buffer in enumerate(all_index_buffers):
-        for setting in index_buffer.renderstate_args:
+        for setting in index_buffer.renderstate_args.deref_array(index_buffer.renderstate_args_count):
             found = False
             for old_setting in accumulated_material_settings:
                 if old_setting.state_type == setting.state_type:
@@ -758,23 +905,23 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     color_sets: list[list[tuple[int, int, int]]] = []
 
     has_translucent_flag = False
-    for vertex_buffer in node.mesh.vertex_buffers:
+    for vertex_buffer in mesh.vertex_buffers.deref_array(mesh.vertex_buffer_count):
         vertices: list[tuple[float, float, float]] = []
         colors: list[tuple[int, int, int]] = []
         normals: list[list[float]] = []
         uvs: list[tuple[float, float]] = []
-        has_color = vertex_has_color(vertex_buffer.vertex_format)
-        has_normals = vertex_has_normals(vertex_buffer.vertex_format)
-        has_uvs = vertex_has_uvs(vertex_buffer.vertex_format)
         if vertex_buffer.vertex_format & 0x10000:
             has_translucent_flag = True
-        for vertex in vertex_buffer.vertex_buffer:
-            vertices.append((vertex.x, -vertex.z, vertex.y))
-            if has_color:
+        vert_ctor = get_vertex_constructor(vertex_buffer.vertex_format)
+        vert_ptr = vertex_buffer.vertices.retype(vert_ctor)
+        for vertex in vert_ptr.deref_array(vertex_buffer.vertex_count):
+            if vertex_has_pos(vertex):
+                vertices.append((vertex.x, -vertex.z, vertex.y))
+            if vertex_has_color(vertex):
                 colors.append((vertex.r, vertex.g, vertex.b))
-            if has_normals:
+            if vertex_has_normals(vertex):
                 normals.append([vertex.nx, -vertex.nz, vertex.ny])
-            if has_uvs:
+            if vertex_has_uvs(vertex):
                 uvs.append((vertex.u, vertex.v))
         vertex_sets.append(vertices)
         color_sets.append(colors)
@@ -794,7 +941,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         faces: list[tuple[int, int, int]] = []
 
         for index_buffer in index_buffers:
-            indices = index_buffer.index_buffer
+            indices = index_buffer.indices.deref_array(index_buffer.index_count)
             for i in range(len(indices) - 2):
                 # Parsing a triangle strip
                 i0 = indices[i + 0]
@@ -819,7 +966,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
         # We need to do this before combining the bmesh because the indices will get scrambled.
         # But we can't add the materials to the mesh yet because they are not saved in the bmesh.
         for index_buffer in index_buffers:
-            indices = index_buffer.index_buffer
+            indices = index_buffer.indices.deref_array(index_buffer.index_count)
             # Assume mat slot index will hopefully match when we actually add the material later
             (mat_slot_idx, mat) = index_buffer_materials[index_buffer.get_offset()]
             for poly in blender_mesh.polygons:
@@ -873,7 +1020,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
 
     # Add material and vertex group for each index buffer
     for i, index_buffer in enumerate(all_index_buffers):
-        indices = index_buffer.index_buffer
+        indices = index_buffer.indices.deref_array(index_buffer.index_count)
         vertex_group = obj.vertex_groups.new(name="{}_node_{}_ib_{}".format(name, node_id, i))
         vertex_group.add(indices, 1.0, "ADD")
         (_, mat) = index_buffer_materials[index_buffer.get_offset()]
@@ -882,7 +1029,7 @@ def xj_node_to_blender_mesh(name: str, node: MeshTreeNode, node_id: int, xj_xvm:
     return obj
 
 
-def xj_to_blender_mesh(name: str, root_node: MeshTreeNode, xvm: xvm.Xvm | None) -> bpy.types.Collection:
+def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
 
     world_scale = util.get_pso_world_scale()
@@ -890,12 +1037,9 @@ def xj_to_blender_mesh(name: str, root_node: MeshTreeNode, xvm: xvm.Xvm | None) 
     # Iterate tree and create a blender object for each node
     # Nodes with meshes are turned into mesh objects and empty nodes into empty objects
     # Hierarchy is maintained with blender's parenting system
-    tree_stack: list[tuple[MeshTreeNode, bpy.types.Object | None]] = [(root_node, None)] # (current_node, current_parent_object)
+    tree_stack: list[tuple[XjMeshTreeNode, bpy.types.Object | None]] = [(root_node, None)] # (current_node, current_parent_object)
     while len(tree_stack) > 0:
         (node, parent_object) = tree_stack.pop()
-
-        if node == NULLPTR:
-            continue
 
         if node.mesh == NULLPTR:
             # Create empty object
@@ -923,8 +1067,10 @@ def xj_to_blender_mesh(name: str, root_node: MeshTreeNode, xvm: xvm.Xvm | None) 
         node_counter += 1
 
         # Iterate children and siblings
-        tree_stack.append((node.child, obj))
-        tree_stack.append((node.next, parent_object))
+        if node.child != NULLPTR:
+            tree_stack.append((node.child.deref(), obj))
+        if node.next != NULLPTR:
+            tree_stack.append((node.next.deref(), parent_object))
 
     return collection
 
@@ -946,7 +1092,7 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
         for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
             eval_flags |= int(x)
 
-        mesh_node = MeshTreeNode(
+        mesh_node = XjMeshTreeNode(
             eval_flags=eval_flags,
             scale_x=1.0,
             scale_y=1.0,
@@ -959,11 +1105,11 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
 
         # Pointers will be overwritten later but we need to mark them as non-null or they won't be saved in the POF0 table
         if has_mesh:
-            mesh_node.mesh = 0xdeadbeef
+            mesh_node.mesh = Ptr32(0xdeadbeef)
         if has_next:
-            mesh_node.next = 0xdeadbeef
+            mesh_node.next = Ptr32(0xdeadbeef)
         if has_children:
-            mesh_node.child = 0xdeadbeef
+            mesh_node.child = Ptr32(0xdeadbeef)
 
         # Write node first, mainly just because the root 
         node_ptr = njcm_chunk.write(mesh_node)
@@ -1005,7 +1151,7 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
         # Make NJTL chunk (doesn't contain pixel data)
         njtl_chunk = IffChunk("NJTL")
         texlist = TextureList(
-            elements=0xdeadbeef,
+            elements=Ptr32(0xdeadbeef),
             count=len(textures))
         texlist_elements_offset = njtl_chunk.write(texlist) + IffHeader.type_size()
 
@@ -1013,7 +1159,7 @@ def make_xj(root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager) 
         for texture in textures:
             tex_name = texture.image.name[0:31]
             name_ptr = njtl_chunk.write(AlignedString(tex_name, IffChunk.ALIGNMENT))
-            ptr = njtl_chunk.write(TextureListEntry(name=name_ptr))
+            ptr = njtl_chunk.write(TextureListEntry(name=Ptr32(name_ptr)))
             if first_texlist_entry_ptr == NULLPTR:
                 first_texlist_entry_ptr = ptr
         # Rewrite pointer
@@ -1067,7 +1213,7 @@ def read(xj_path: str, xj_xvm: xvm.Xvm | None) -> list[Collection]:
                 # Could maybe check if pointers to 0 are valid?
                 _ = parse_pof0(filename, file_contents, prev_chunk_offset, chunk_offset, chunk_header.body_size)
                 # Read a NJCM
-                (root_node, _) = MeshTreeNode.read_tree(Mesh, file_contents[prev_chunk_offset + chunk_header_size:], 0)
+                (root_node, _) = XjMeshTreeNode.deserialize_from(file_contents[prev_chunk_offset + chunk_header_size:], 0)
                 models = xj_to_blender_mesh(filename, root_node, xj_xvm)
                 collections.append(models)
                 need_pof0 = False

@@ -5,7 +5,7 @@ from mathutils import Vector
 from dataclasses import dataclass, field
 import bpy.types 
 from .rel import Rel
-from .serialization import Serializable, Numeric
+from .serialization import Serializable, Numeric, Ptr32
 from . import util
 
 
@@ -16,7 +16,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
@@ -56,9 +55,9 @@ class Face(Serializable):
 @dataclass
 class Mesh(Serializable):
     vertex_count: U32 = 0
-    vertices: Ptr32 = NULLPTR # VertexArray
+    vertices: Ptr32[VertexArray] = Ptr32(NULLPTR)
     face_count: U32 = 0
-    faces: Ptr32 = NULLPTR # Face
+    faces: Ptr32[Face] = Ptr32(NULLPTR)
 
 
 COLLISION_FLAG_TYPES = {
@@ -93,7 +92,7 @@ class TerrainFlag:
 
 @dataclass
 class CrelNode(Serializable):
-    mesh: Ptr32 = NULLPTR # Mesh
+    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -103,7 +102,7 @@ class CrelNode(Serializable):
 
 @dataclass
 class Crel(Serializable):
-    nodes: Ptr32 = NULLPTR # CrelNode
+    nodes: Ptr32[CrelNode] = Ptr32(NULLPTR)
 
 
 def write(path: str, objects: list[bpy.types.Object]):
@@ -143,7 +142,7 @@ def write(path: str, objects: list[bpy.types.Object]):
 
         mesh = Mesh(
             vertex_count=len(vertex_array.vertices),
-            vertices=rel.write(vertex_array),
+            vertices=Ptr32(rel.write(vertex_array)),
             face_count=len(blender_mesh.loop_triangles))
 
         # Write faces
@@ -194,9 +193,9 @@ def write(path: str, objects: list[bpy.types.Object]):
             if first_face_ptr is None:
                 first_face_ptr = ptr
         if first_face_ptr is not None:
-            mesh.faces = first_face_ptr
+            mesh.faces = Ptr32(first_face_ptr)
 
-        node.mesh = rel.write(mesh)
+        node.mesh = Ptr32(rel.write(mesh))
         nodes.append(node)
 
         obj.to_mesh_clear() # Delete temporary mesh
@@ -209,7 +208,7 @@ def write(path: str, objects: list[bpy.types.Object]):
             first_node_ptr = ptr
     crel = Crel()
     if first_node_ptr is not None:
-        crel.nodes = first_node_ptr
+        crel.nodes = Ptr32(first_node_ptr)
     file_contents = rel.finish(rel.write(crel))
     with open(path, "wb") as f:
         _ = f.write(file_contents)

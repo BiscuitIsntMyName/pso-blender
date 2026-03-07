@@ -60,9 +60,8 @@ class ImportRel(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
         if map_type_suffix == "c":
             collection = c_rel.read(rel_filename)
         elif map_type_suffix == "n":
-            nrel = n_rel.read(rel_filename)
             nrel_xvm = xvm.read(xvm_filename) if xvm_filename else None
-            collection = n_rel.to_blender(rel_filename, nrel, nrel_xvm)
+            collection = n_rel.read(rel_filename, nrel_xvm)
         elif map_type_suffix == "r":
             self.report({"ERROR"}, "Unimplemented file type for import")
         else:

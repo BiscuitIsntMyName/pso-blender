@@ -5,7 +5,7 @@ from warnings import warn
 
 from bpy.types import Collection
 from .serialization import Serializable, Numeric, FixedArray, ResizableBuffer
-from . import prs, njcm, xvm, xj, util, njm
+from . import prs, xvm, xj, util, njm
 from .nj import nj_to_blender_mesh
 from .iff import IffHeader, parse_pof0
 
@@ -17,7 +17,6 @@ I8 = Numeric.I8
 I16 = Numeric.I16
 I32 = Numeric.I32
 F32 = Numeric.F32
-Ptr32 = Numeric.Ptr32
 NULLPTR = Numeric.NULLPTR
 
 
@@ -136,7 +135,7 @@ def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm | None) -> list[Collection]:
     collections: list[Collection] = []
     if bml_item.name.endswith(".xj"):
         for model in bml_item.models:
-            (root_node, _) = njcm.MeshTreeNode.read_tree(xj.Mesh, model, 0)
+            (root_node, _) = xj.XjMeshTreeNode.deserialize_from(model, 0)
             collections.append(xj.xj_to_blender_mesh(bml_item.name, root_node, xvm))
     elif bml_item.name.endswith(".nj"):
         for model in bml_item.models:
@@ -148,7 +147,7 @@ def to_blender_mesh(bml_item: BmlItem, xvm: xvm.Xvm | None) -> list[Collection]:
     return collections
 
 
-def read(bml_path: str, bml_xvm: xvm.Xvm | None) -> list[bpy.types.Collection]:
+def read(bml_path: str, bml_xvm: xvm.Xvm | None) -> list[Collection]:
     bml = parse_bml(bml_path)
     collections: list[Collection] = []
     for bml_item in bml:
@@ -160,16 +159,17 @@ def read(bml_path: str, bml_xvm: xvm.Xvm | None) -> list[bpy.types.Collection]:
 
 
 def write(bml_path: str, xvm_path: str):
-    objects_by_collection: list[BmlItem] = []
+    objects_by_collection: list[tuple[str, list[bpy.types.Object]]] = []
     all_objects: list[bpy.types.Object] = []
     for coll in bpy.data.collections:
         if not coll.hide_viewport:
-            objs = BmlItem(name=coll.name)
+            models: list[bpy.types.Object] = []
+            objs = (coll.name, models)
             for obj in coll.all_objects:
                 if obj.type == "MESH" and not obj.hide_get():
-                    objs.models.append(obj)
+                    models.append(obj)
                     all_objects.append(obj)
-            if len(objs.models) > 0:
+            if len(models) > 0:
                 objects_by_collection.append(objs)
     
     if len(objects_by_collection) < 1:
@@ -190,9 +190,9 @@ def write(bml_path: str, xvm_path: str):
 
     chunks_size_sum = 0
     # Collection = file inside BML
-    for collection in objects_by_collection:
+    for (coll_name, coll_models) in objects_by_collection:
         files_sum_before = files_buf.offset
-        njcm_chunk_buf = xj.make_xj(collection.models, texture_man)
+        njcm_chunk_buf = xj.make_xj(coll_models, texture_man)
         _ = files_buf.append(njcm_chunk_buf)
         chunks_size_sum = len(njcm_chunk_buf)
         compressed_size = chunks_size_sum
@@ -203,7 +203,7 @@ def write(bml_path: str, xvm_path: str):
 
         # Write file descriptions after BML header
         file_desc = FileDescription(
-            name=list(bytes(collection.name[0:28] + ".xj", "ascii")),
+            name=list(bytes(coll_name[0:28] + ".xj", "ascii")),
             compressed_size=compressed_size,
             decompressed_size=chunks_size_sum,
             textures_compressed_size=0,
@@ -211,9 +211,9 @@ def write(bml_path: str, xvm_path: str):
         _ = file_desc.serialize_into(bml_buf)
 
     # Write njm's into bml
-    for collection in objects_by_collection:
+    for (coll_name, coll_models) in objects_by_collection:
         for action in bpy.data.actions:
-            nmdm_chunk_buf = njm.make_njm(collection.models, action)
+            nmdm_chunk_buf = njm.make_njm(coll_models, action)
             # Chunk (+POF0) is done
             files_sum_before = files_buf.offset
             _ = files_buf.append(nmdm_chunk_buf)
@@ -226,7 +226,7 @@ def write(bml_path: str, xvm_path: str):
 
             # Write file descriptions after BML header
             file_desc = FileDescription(
-                name=list(bytes(collection.name[0:27] + ".njm", "ascii")),
+                name=list(bytes(coll_name[0:27] + ".njm", "ascii")),
                 compressed_size=compressed_size,
                 decompressed_size=chunks_size_sum,
                 textures_compressed_size=0,
