@@ -582,16 +582,17 @@ def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bp
     material_strips: list[MaterialStrips] = []
     if texture_man.object_has_textures(obj):
         material_faces: list[list[tuple[int, int, int]]] = []
+        # Remove empty slots
+        material_slots = [slot for slot in obj.material_slots if slot.material is not None]
         # Get all faces grouped by their material, then stripify them
-        for (mat_idx, mat_slot) in enumerate(obj.material_slots):
+        for (mat_idx, mat_slot) in enumerate(material_slots):
             material_faces.append([])
             material_strips.append(MaterialStrips(mat_idx, mat_slot.material, []))
         for face in blender_mesh.loop_triangles:
             material_faces[face.material_index].append((face.loops[0], face.loops[1], face.loops[2]))
-        for mat_idx in range(len(obj.material_slots)):
-            if len(material_faces[mat_idx]) > 0:
-                strips = cast(list[list[int]], tristrip.stripify(material_faces[mat_idx], stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
-                material_strips[mat_idx].strips = strips
+        for mat_idx in range(len(material_slots)):
+            strips = cast(list[list[int]], tristrip.stripify(material_faces[mat_idx], stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
+            material_strips[mat_idx].strips = strips
     else:
         faces: list[tuple[int, int, int]] = []
         for face in blender_mesh.loop_triangles:
