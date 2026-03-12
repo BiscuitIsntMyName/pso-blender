@@ -316,7 +316,7 @@ class IndexBufferContainer(Serializable):
 
 
 @dataclass
-class Mesh(Serializable):
+class XjMesh(Serializable):
     flags: U32 = 0
     vertex_buffers: Ptr32[VertexBufferContainer] = Ptr32(NULLPTR)
     vertex_buffer_count: U32 = 0
@@ -329,8 +329,8 @@ class Mesh(Serializable):
 # Specialize node
 @final
 @dataclass
-class XjMeshTreeNode(MeshTreeNode[Mesh]):
-    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
+class XjMeshTreeNode(MeshTreeNode[XjMesh]):
+    mesh: Ptr32[XjMesh] = Ptr32(NULLPTR)
     child: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
     next: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
 
@@ -483,7 +483,7 @@ class VertexBuffer(Serializable):
     vertices: list[VertexBase] = field(default_factory=list)
 
 
-def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: Mesh, has_textures: bool, vertex_colors: bpy.types.FloatColorAttribute | None, normal_type: int | None):
+def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: XjMesh, has_textures: bool, vertex_colors: bpy.types.FloatColorAttribute | None, normal_type: int | None):
     use_normals = normal_type is not None
 
     # One vertex per loop
@@ -602,7 +602,7 @@ def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bp
     return material_strips
 
 
-def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: Mesh, texture_man: xvm.TextureManager, has_vertex_alpha: bool):
+def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: XjMesh, texture_man: xvm.TextureManager, has_vertex_alpha: bool):
     # Texture IDs must be 0-based for the render settings
     # One buffer per strip
     material_strips = create_tristrips_grouped_by_material(obj, blender_mesh, texture_man)
@@ -658,11 +658,11 @@ def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Ob
     xj_mesh.index_buffers = Ptr32(first_opaque_index_buffer_container_ptr)
 
 
-def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> Mesh:
+def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> XjMesh:
     if texture_man.object_has_textures(obj) and len(blender_mesh.uv_layers) < 1:
         raise Exception("XJ error in object '{}': Object has texture but is missing UVs".format(obj.name))
 
-    mesh = Mesh()
+    mesh = XjMesh()
 
     normal_type = None
     for mat_slot in obj.material_slots:

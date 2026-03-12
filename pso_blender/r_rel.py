@@ -7,7 +7,7 @@ from .serialization import Serializable, Numeric, Ptr32
 from . import util, tristrip
 from .nj import (
     Vertex,
-    Mesh,
+    NjMesh,
     VertexListNode,
     IndexArray,
     IndexListNode)
@@ -26,7 +26,7 @@ NULLPTR = Numeric.NULLPTR
 @dataclass
 class MeshContainer(Serializable):
     unk1: U32 = 0
-    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
+    mesh: Ptr32[NjMesh] = Ptr32(NULLPTR)
 
 
 @dataclass
@@ -82,7 +82,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         strips = cast(list[list[int]], tristrip.stripify(faces, stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
 
         container = MeshContainer()
-        mesh = Mesh(
+        mesh = NjMesh(
             x=geom_center[0],
             y=geom_center[1],
             z=geom_center[2])
@@ -122,8 +122,8 @@ def write(path: str, room_objects: list[bpy.types.Object]):
 
         _ = rel.write(IndexListNode(flags=0xff)) # Terminator
 
-        mesh.vertex_list = vertex_node_ptr
-        mesh.index_list = index_node_ptr
+        mesh.vertex_list = Ptr32(vertex_node_ptr)
+        mesh.index_list = Ptr32(index_node_ptr)
         mesh_ptr = rel.write(mesh)
 
         container.mesh = Ptr32(mesh_ptr)

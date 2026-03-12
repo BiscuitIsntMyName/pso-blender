@@ -54,7 +54,7 @@ class IndexListNode(Serializable):
 
 
 @dataclass
-class Mesh(Serializable):
+class NjMesh(Serializable):
     vertex_list: Ptr32[VertexListNode] = Ptr32(NULLPTR)
     index_list: Ptr32[IndexListNode] = Ptr32(NULLPTR)
     x: F32 = 0.0
@@ -64,7 +64,7 @@ class Mesh(Serializable):
     @classmethod
     @override
     def deserialize_from(cls, buf: Buffer, offset: int=0):
-        (mesh, after) = super(Mesh, cls).deserialize_from(buf, offset)
+        (mesh, after) = super(NjMesh, cls).deserialize_from(buf, offset)
         vertex_list_offset = mesh.vertex_list - offset
         mesh.vertex_list = []
         while True:
@@ -82,7 +82,7 @@ class Mesh(Serializable):
 
 
 def nj_to_blender_mesh(name: str, buf: bytearray, offset: int) -> Collection | None:
-    (model, _) = MeshTreeNode.read_tree(Mesh, buf, offset)
+    (model, _) = MeshTreeNode.read_tree(NjMesh, buf, offset)
     if model.mesh == NULLPTR:
         return None
     collection = bpy.data.collections.new(name)

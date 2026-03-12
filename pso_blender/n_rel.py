@@ -357,8 +357,8 @@ def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
         tree_counter = 0
         for tree in chunk.static_mesh_trees.deref_array(chunk.static_mesh_tree_count):
             if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE:
-                ptr = Ptr32[U32](int(tree.root_node))
-                tree.root_node = Ptr32(ptr.deref())
+                dbl_ptr = tree.root_node.retype(cast(type[int], U32))
+                tree.root_node = tree.root_node.clone(dbl_ptr.deref())
             root_node = tree.root_node.deref()
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), root_node, nrel_xvm)
             for obj in models.objects:

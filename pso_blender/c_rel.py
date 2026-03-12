@@ -20,7 +20,7 @@ NULLPTR = Numeric.NULLPTR
 
 
 @dataclass
-class Vertex(Serializable):
+class CollisionVertex(Serializable):
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -34,7 +34,7 @@ class Vertex(Serializable):
 
 @dataclass
 class VertexArray(Serializable):
-    vertices: list[Vertex] = field(default_factory=list)
+    vertices: list[CollisionVertex] = field(default_factory=list)
 
 
 @dataclass
@@ -53,7 +53,7 @@ class Face(Serializable):
 
 
 @dataclass
-class Mesh(Serializable):
+class CollisionMesh(Serializable):
     vertex_count: U32 = 0
     vertices: Ptr32[VertexArray] = Ptr32(NULLPTR)
     face_count: U32 = 0
@@ -92,7 +92,7 @@ class TerrainFlag:
 
 @dataclass
 class CrelNode(Serializable):
-    mesh: Ptr32[Mesh] = Ptr32(NULLPTR)
+    mesh: Ptr32[CollisionMesh] = Ptr32(NULLPTR)
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
@@ -136,11 +136,11 @@ def write(path: str, objects: list[bpy.types.Object]):
         for local_vert in blender_mesh.vertices:
             world_vert = util.from_blender_axes(obj.matrix_world @ local_vert.co) * util.get_pso_world_scale()
             farthest_sq = max(farthest_sq, util.distance_squared(geom_center.xz.to_tuple(), world_vert.xz.to_tuple()))
-            vertex_array.vertices.append(Vertex(
+            vertex_array.vertices.append(CollisionVertex(
                 x=world_vert[0], y=world_vert[1], z=world_vert[2]))
         node.radius = math.sqrt(farthest_sq)
 
-        mesh = Mesh(
+        mesh = CollisionMesh(
             vertex_count=len(vertex_array.vertices),
             vertices=Ptr32(rel.write(vertex_array)),
             face_count=len(blender_mesh.loop_triangles))
@@ -227,13 +227,13 @@ def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object
     blender_vertices: list[tuple[float, float, float]] = []
     blender_edges: list[tuple[int, int, int]] = []
     blender_faces: list[tuple[int, int, int]] = []
-    (mesh, _) = rel.read(Mesh, node.mesh)
+    (mesh, _) = rel.read(CollisionMesh, node.mesh)
     blender_mesh = bpy.data.meshes.new("mesh_" + str(node_idx))
     faces: list[Face] = []
 
-    vertex_size = Vertex.type_size()
+    vertex_size = CollisionVertex.type_size()
     for i in range(mesh.vertex_count):
-        (vertex, _) = rel.read(Vertex, mesh.vertices + vertex_size * i)
+        (vertex, _) = rel.read(CollisionVertex, mesh.vertices + vertex_size * i)
         coords = (vertex.x - node.x, vertex.z - node.z, vertex.y - node.y)
         blender_vertices.append(coords)
 
