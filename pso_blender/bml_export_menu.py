@@ -1,5 +1,5 @@
 import os
-from typing import cast, final, override
+from typing import cast, final
 from bpy_extras.io_utils import ExportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
@@ -26,8 +26,7 @@ class ExportBml(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
 
     filepath: StringProperty(subtype="FILE_PATH")
 
-    @override
-    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
+    def execute(self, context: Context):
         filepath = cast(str, self.filepath)
         noext, _ext = os.path.splitext(filepath)
         bml.write(filepath, noext + ".xvm")

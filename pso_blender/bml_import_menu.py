@@ -1,4 +1,4 @@
-from typing import cast, final, override
+from typing import cast, final
 import bpy, os
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Context, Operator
@@ -26,8 +26,7 @@ class ImportBml(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
         options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH")
 
-    @override
-    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
+    def execute(self, context: Context):
         bml_path = None
         xvm_path = None
         selected_files = cast(bpy.types.OperatorFileListElement, self.files)

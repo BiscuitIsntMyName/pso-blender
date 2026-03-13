@@ -1,6 +1,6 @@
 
 from collections.abc import Callable
-from typing import Any, cast, final, override
+from typing import Any, cast, final
 import bpy
 from bpy.types import Panel, Context
 from bpy.props import BoolProperty, IntProperty  # pyright: ignore[reportUnknownVariableType]
@@ -68,16 +68,13 @@ class MeshNrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    @override
     def poll(cls, context: Context):
         return context.object is not None and context.object.type == "MESH"
 
-    @override
     def draw_header(self, context: Context):
         if context.object is not None and self.layout is not None:
             self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_nrel", text="")
     
-    @override
     def draw(self, context: Context):
         if self.layout is not None and context.object is not None:
             self.layout.use_property_split = True
@@ -103,16 +100,13 @@ class MeshCrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    @override
     def poll(cls, context: Context):
         return context.object is not None and context.object.type == "MESH"
 
-    @override
     def draw_header(self, context: Context):
         if self.layout is not None:
             self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_crel", text="")
     
-    @override
     def draw(self, context: Context):
         if self.layout is not None and context.object is not None:
             self.layout.use_property_split = True
@@ -137,16 +131,13 @@ class MeshRrelSettingsPanel(Panel):
     bl_options = {"DEFAULT_CLOSED"}
 
     @classmethod
-    @override
     def poll(cls, context: Context):
         return context.object is not None and context.object.type == "MESH"
 
-    @override
     def draw_header(self, context: Context):
         if self.layout is not None:
             self.layout.prop(cast(ObjectWithRelSettings, context.object).rel_settings, "is_rrel", text="")
     
-    @override
     def draw(self, context: Context):
         if self.layout is not None and context.object is not None:
             settings = cast(ObjectWithRelSettings, context.object).rel_settings
@@ -163,11 +154,9 @@ class MeshRelSettingsPanel(Panel):
     bl_context = "object"
 
     @classmethod
-    @override
     def poll(cls, context: Context):
         return context.object is not None and context.object.type == "MESH"
     
-    @override
     def draw(self, context: Context):
         if self.layout is not None and context.object is not None:
             self.layout.use_property_split = True

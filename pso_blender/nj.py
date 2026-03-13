@@ -1,5 +1,3 @@
-from collections.abc import Buffer
-from typing import override
 import bpy, warnings
 from dataclasses import dataclass, field
 
@@ -62,8 +60,7 @@ class NjMesh(Serializable):
     z: F32 = 0.0
 
     @classmethod
-    @override
-    def deserialize_from(cls, buf: Buffer, offset: int=0):
+    def deserialize_from(cls, buf: bytearray, offset: int=0):
         (mesh, after) = super(NjMesh, cls).deserialize_from(buf, offset)
         vertex_list_offset = mesh.vertex_list - offset
         mesh.vertex_list = []

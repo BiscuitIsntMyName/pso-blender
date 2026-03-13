@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Self, final
+from typing import Generic, Self, TypeVar, final
 from .serialization import Serializable, Numeric, Ptr32
 
 
@@ -27,8 +27,11 @@ class NinjaEvalFlag:
     MODIFIER = 0b1000000000
 
 
+T = TypeVar("T", bound=Serializable)
+
+
 @dataclass
-class MeshTreeNode[T: Serializable](Serializable):
+class MeshTreeNode(Serializable, Generic[T]):
     eval_flags: U32 = 0
     mesh: Ptr32[T] = Ptr32(NULLPTR) # Mesh
     x: F32 = 0.0

@@ -1,19 +1,33 @@
-from collections.abc import Buffer, Callable
+from __future__ import annotations
+from collections.abc import Callable
 from functools import partial
 from inspect import isclass
-import sys
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Self, TypeAlias, TypeAliasType, cast, final, get_type_hints, get_args, get_origin, Annotated, override
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Self, TypeAlias, cast, final, get_type_hints, get_args, get_origin, Annotated, TypeVar
 from struct import pack_into, unpack_from, calcsize
+from typing_extensions import TypeAliasType
 from warnings import warn
 
 
-def typehint_of_name(name: str, ns: Any=sys.modules[__name__]):
-    ns = ns if isclass(ns) else ns.__class__
-    return get_type_hints(ns).get(name)
+T = TypeVar("T")
+L = TypeVar("L")
+S = TypeVar("S", bound="Serializable")
 
 
-type FixedArray[T, L] = Annotated[list[T], L]
+if TYPE_CHECKING:
+    class FixedArray(list[T], Generic[T, L]):
+        pass
+else:
+    class FixedArray(list[T], Generic[T, L]):
+        def __subclasscheck__(cls, subclass):
+            return type.__subclasscheck__(cls, subclass)
+
+        def __class_getitem__(cls, params):
+            T_type, L_val = params
+            return TypeAliasType("FixedArray", Annotated[T_type, L_val])
+        
+        def __init__(*args, **kwargs):
+            list.__init__(*args, **kwargs)
 
 
 @dataclass
@@ -154,16 +168,48 @@ class ResizableBuffer:
             return self.pack_one(fmt, vals)
 
 
+@dataclass
+class NumericFieldPlan:
+    name: str
+    tp: Any
+    fmt: str
+    value_getter: Callable[[Serializable], Any]
+
+@dataclass
+class MultipleNumericFieldPlan:
+    names: list[str]
+    tp: list[Any]
+    fmt: str
+    value_getter: Callable[[Serializable], list[Any]]
+
+@dataclass
+class DynamicNumericFieldPlan:
+    name: str
+    tp: Any
+    fmt_getter: Callable[[Serializable], str]
+    value_getter: Callable[[Serializable], list[Any]]
+
+@dataclass
+class ChildFieldPlan:
+    name: str
+    tp: Any
+    value_getter: Callable[[Serializable], Any]
+
+@dataclass
+class DynamicChildFieldPlan:
+    name: str
+    tp: Any
+    value_getter: Callable[[Serializable], list[Serializable]]
+
+FieldPlan: TypeAlias = NumericFieldPlan | MultipleNumericFieldPlan | DynamicNumericFieldPlan | ChildFieldPlan | DynamicChildFieldPlan
+VisitPlan: TypeAlias = list[FieldPlan]
+
+TypeVisitor: TypeAlias = Callable[[type["Serializable"], FieldPlan, dict[str, Any]], None]
+InstanceVisitor: TypeAlias = Callable[["Serializable", FieldPlan, dict[str, Any]], None]
+
 class Serializable:
     _offset: int = -1
-    _src_buf: Buffer | None = None
-
-    @classmethod
-    def format_of_member(cls, member: str) -> str | None:
-        fmt = Numeric.format_of_type(typehint_of_name(member, cls))
-        if fmt:
-            return fmt
-        return None
+    _src_buf: bytearray | None = None
     
     @dataclass
     class MemberVisitResult:
@@ -173,55 +219,16 @@ class Serializable:
         fmt: str
         offset: int
 
-    @dataclass
-    class NumericFieldPlan:
-        name: str
-        tp: Any
-        fmt: str
-        value_getter: Callable[[Serializable], Any]
-    
-    @dataclass
-    class MultipleNumericFieldPlan:
-        names: list[str]
-        tp: list[Any]
-        fmt: str
-        value_getter: Callable[[Serializable], list[Any]]
-    
-    @dataclass
-    class DynamicNumericFieldPlan:
-        name: str
-        tp: Any
-        fmt_getter: Callable[[Serializable], str]
-        value_getter: Callable[[Serializable], list[Any]]
-
-    @dataclass
-    class ChildFieldPlan:
-        name: str
-        tp: Any
-        value_getter: Callable[[Serializable], Any]
-    
-    @dataclass
-    class DynamicChildFieldPlan:
-        name: str
-        tp: Any
-        value_getter: Callable[[Serializable], list[Serializable]]
-
-    type FieldPlan = NumericFieldPlan | MultipleNumericFieldPlan | DynamicNumericFieldPlan | ChildFieldPlan | DynamicChildFieldPlan
-    type VisitPlan = list[FieldPlan]
-
-    type TypeVisitor = Callable[[type[Serializable], FieldPlan, dict[str, Any]], None]
-    type InstanceVisitor = Callable[[Serializable, FieldPlan, dict[str, Any]], None]
-
     _visit_plan_cache: ClassVar[dict[str, VisitPlan]] = dict()
 
     @staticmethod
     def _member_visitor(parent: Serializable | type[Serializable], plan: FieldPlan, ctx: dict[str, Any]):
-        if isinstance(plan, Serializable.NumericFieldPlan):
+        if isinstance(plan, NumericFieldPlan):
             value = None if isclass(parent) else plan.value_getter(parent)
             visit_result = Serializable.MemberVisitResult(value, plan.name, plan.tp, plan.fmt, ctx["size_sum"])
             ctx["members"].append(visit_result)
             ctx["size_sum"] += Numeric.size_of_format(plan.fmt)
-        elif isinstance(plan, Serializable.MultipleNumericFieldPlan):
+        elif isinstance(plan, MultipleNumericFieldPlan):
             count = len(plan.names)
             values = [None] * count if isclass(parent) else plan.value_getter(parent)
             for i in range(count):
@@ -229,7 +236,7 @@ class Serializable:
                 visit_result = Serializable.MemberVisitResult(values[i], plan.names[i], plan.tp[i], fmt, ctx["size_sum"])
                 ctx["members"].append(visit_result)
                 ctx["size_sum"] += Numeric.size_of_format(fmt)
-        elif isinstance(plan, Serializable.DynamicNumericFieldPlan):
+        elif isinstance(plan, DynamicNumericFieldPlan):
             if isclass(parent):
                 value = None
                 fmt = ""
@@ -240,7 +247,7 @@ class Serializable:
                     ctx["size_sum"] += Numeric.size_of_format(fmt)
             visit_result = Serializable.MemberVisitResult(value, plan.name, plan.tp, fmt, ctx["size_sum"])
             ctx["members"].append(visit_result)
-        elif isinstance(plan, Serializable.DynamicChildFieldPlan):
+        elif isinstance(plan, DynamicChildFieldPlan):
             if isclass(parent):
                 pass
             else:
@@ -322,8 +329,8 @@ class Serializable:
     
     @staticmethod
     def _build_visit_plan(root_value: type[Serializable]) -> VisitPlan:
-        plan: Serializable.VisitPlan = []
-        field_types = get_type_hints(root_value)
+        plan: VisitPlan = []
+        field_types = get_type_hints(root_value, include_extras=True)
         numeric_fields_names_accum: list[str] = []
         numeric_fields_types_accum: list[Any] = []
 
@@ -347,7 +354,7 @@ class Serializable:
                     bound_numeric_field_getter = partial(numeric_field_getter, numeric_fields_names_accum[0])
                     field_fmt = Numeric.format_of_type(numeric_fields_types_accum[0])
                     assert(field_fmt)
-                    plan.append(Serializable.NumericFieldPlan(
+                    plan.append(NumericFieldPlan(
                         numeric_fields_names_accum[0],
                         numeric_fields_types_accum[0],
                         field_fmt,
@@ -357,7 +364,7 @@ class Serializable:
                         lambda numeric_fields, ser: [ser.__dict__[name] for name in numeric_fields]
                     bound_multiple_numeric_field_getter = partial(multiple_numeric_field_getter, numeric_fields_names_accum)
                     field_fmt = Numeric.format_of_types(numeric_fields_types_accum)
-                    plan.append(Serializable.MultipleNumericFieldPlan(
+                    plan.append(MultipleNumericFieldPlan(
                         numeric_fields_names_accum,
                         numeric_fields_types_accum,
                         field_fmt,
@@ -373,7 +380,7 @@ class Serializable:
                 assert(field_fmt)
                 ptr_field_getter: Callable[[str, Serializable], Any] = lambda field_name, ser: ser.__dict__[field_name]
                 bound_ptr_field_getter = partial(ptr_field_getter, field_name)
-                plan.append(Serializable.NumericFieldPlan(
+                plan.append(NumericFieldPlan(
                     field_name,
                     field_type,
                     field_fmt,
@@ -382,9 +389,9 @@ class Serializable:
                 # Combine consecutive numeric fields
                 numeric_fields_names_accum.append(field_name)
                 numeric_fields_types_accum.append(field_type)
-            elif field_type_origin is FixedArray:
+            elif field_type.__name__ == "FixedArray":
                 # FixedArray
-                fixarr_params = get_args(field_type)
+                fixarr_params = get_args(field_type.__value__)
                 elem_type = fixarr_params[0]
                 expected_len = cast(int, get_args(fixarr_params[1])[0])
                 if Numeric.is_numeric_type(elem_type):
@@ -405,7 +412,7 @@ class Serializable:
                         return field_value
                     bound_numeric_fixed_array_getter = partial(numeric_fixed_array_getter, field_name, expected_len)
                     field_fmt = Numeric.format_of_types([elem_type] * expected_len)
-                    plan.append(Serializable.MultipleNumericFieldPlan(
+                    plan.append(MultipleNumericFieldPlan(
                         [field_name] * expected_len,
                         [field_type] * expected_len,
                         field_fmt,
@@ -422,7 +429,7 @@ class Serializable:
                     bound_fmt_getter = partial(fmt_getter, field_name, elem_type)
                     numeric_list_getter: Callable[[str, Serializable], Any] = lambda field_name, ser: ser.__dict__[field_name]
                     bound_numeric_list_getter = partial(numeric_list_getter, field_name)
-                    plan.append(Serializable.DynamicNumericFieldPlan(
+                    plan.append(DynamicNumericFieldPlan(
                         field_name,
                         field_type,
                         bound_fmt_getter,
@@ -430,7 +437,7 @@ class Serializable:
                 elif issubclass(elem_type, Serializable):
                     child_list_getter: Callable[[str, Serializable], Any] = lambda field_name, ser: ser.__dict__[field_name]
                     bound_child_list_getter = partial(child_list_getter, field_name)
-                    plan.append(Serializable.DynamicChildFieldPlan(
+                    plan.append(DynamicChildFieldPlan(
                         field_name,
                         field_type,
                         bound_child_list_getter))
@@ -443,7 +450,7 @@ class Serializable:
                 bound_buffer_fmt_getter = partial(buffer_fmt_getter, field_name)
                 buffer_getter: Callable[[str, Serializable], Any] = lambda field_name, ser: ser.__dict__[field_name]
                 bound_buffer_getter = partial(buffer_getter, field_name)
-                plan.append(Serializable.DynamicNumericFieldPlan(
+                plan.append(DynamicNumericFieldPlan(
                     field_name,
                     field_type,
                     bound_buffer_fmt_getter,
@@ -452,7 +459,7 @@ class Serializable:
                 # Serializable
                 child_getter: Callable[[str, Serializable], Any] = lambda field_name, ser: ser.__dict__[field_name]
                 bound_child_getter = partial(child_getter, field_name)
-                plan.append(Serializable.ChildFieldPlan(
+                plan.append(ChildFieldPlan(
                     field_name,
                     field_type,
                     bound_child_getter))
@@ -463,32 +470,32 @@ class Serializable:
     @staticmethod
     def _serializer_visitor(parent: Serializable, plan: FieldPlan, ctx: dict[str, Any]):
         buf: ResizableBuffer = ctx["buf"]
-        if isinstance(plan, Serializable.NumericFieldPlan):
+        if isinstance(plan, NumericFieldPlan):
             offset = buf.pack_one(plan.fmt, plan.value_getter(parent))
             if ctx["first_offset"] is None:
                 ctx["first_offset"] = offset
-        elif isinstance(plan, Serializable.MultipleNumericFieldPlan):
+        elif isinstance(plan, MultipleNumericFieldPlan):
             offset = buf.pack_multiple(plan.fmt, plan.value_getter(parent))
             if ctx["first_offset"] is None:
                 ctx["first_offset"] = offset
-        elif isinstance(plan, Serializable.DynamicNumericFieldPlan):
+        elif isinstance(plan, DynamicNumericFieldPlan):
             value = plan.value_getter(parent)
             if len(value) > 0:
                 offset = buf.pack_multiple(plan.fmt_getter(parent), value)
                 if ctx["first_offset"] is None:
                     ctx["first_offset"] = offset
-        elif isinstance(plan, Serializable.ChildFieldPlan):
+        elif isinstance(plan, ChildFieldPlan):
             child = plan.value_getter(parent)
             offset = child.serialize_into(buf)
             if ctx["first_offset"] is None:
                 ctx["first_offset"] = offset
-        elif isinstance(plan, Serializable.DynamicChildFieldPlan):
+        elif isinstance(plan, DynamicChildFieldPlan):  # pyright: ignore[reportUnnecessaryIsInstance]
             for child in plan.value_getter(parent):
                 offset = child.serialize_into(buf)
                 if ctx["first_offset"] is None:
                     ctx["first_offset"] = offset
         else:
-            raise Exception("Unimplemented visit plan " + str(plan.__class__.__name__))
+            raise Exception("Unimplemented visit plan " + str(plan.__class__.__name__))  # pyright: ignore[reportUnreachable]
 
     def serialize_into(self, buf: ResizableBuffer, alignment: int | None=None) -> int:
         """Writes serializable members of this object into given buffer.
@@ -507,8 +514,8 @@ class Serializable:
         return first_offset
 
     @staticmethod
-    def _deserializer_visitor(clazz: type[Serializable], plan: FieldPlan, ctx: dict[str, Any]):
-        if isinstance(plan, Serializable.NumericFieldPlan):
+    def _deserializer_visitor(_clazz: type[Serializable], plan: FieldPlan, ctx: dict[str, Any]):
+        if isinstance(plan, NumericFieldPlan):
             sz = Numeric.size_of_format(plan.fmt)
             (deserialized, ) = unpack_from(plan.fmt, ctx["buf"], ctx["offset"])
             type_origin = get_origin(plan.tp)
@@ -523,29 +530,29 @@ class Serializable:
             else:
                 ctx["result"].__dict__[plan.name] = deserialized
             ctx["offset"] += sz
-        elif isinstance(plan, Serializable.MultipleNumericFieldPlan):
+        elif isinstance(plan, MultipleNumericFieldPlan):
             count = len(plan.names)
             values = unpack_from(plan.fmt, ctx["buf"], ctx["offset"])
             for i in range(count):
                 fmt = Numeric.endianness_prefix + plan.fmt[-count + i]
                 sz = Numeric.size_of_format(fmt)
                 type_origin = get_origin(plan.tp[i])
-                if type_origin is list or type_origin is FixedArray:
+                if type_origin is list or plan.tp[i].__name__ == "FixedArray":
                     ctx["result"].__dict__[plan.names[i]].append(values[i])
                 else:
                     ctx["result"].__dict__[plan.names[i]] = values[i]
                 ctx["offset"] += sz
-        elif isinstance(plan, Serializable.DynamicNumericFieldPlan):
+        elif isinstance(plan, DynamicNumericFieldPlan):
             # Unsized field
             pass
-        elif isinstance(plan, Serializable.DynamicChildFieldPlan):
+        elif isinstance(plan, DynamicChildFieldPlan):
             # Unsized field
             pass
         else:
             raise Exception("Unimplemented visit plan " + str(plan.__class__.__name__))
     
     @classmethod
-    def deserialize_from[T: Serializable](cls: type[T], buf: Buffer, offset: int=0) -> tuple[T, int]:
+    def deserialize_from(cls: type[S], buf: bytearray, offset: int=0) -> tuple[S, int]:
         """Assumes class has default constructor"""
         result = cls() # Default construct
         result._offset = offset
@@ -556,7 +563,7 @@ class Serializable:
         return (result, offset)
     
     @classmethod
-    def read_sequence(cls: type[Self], buf: Buffer, offset: int, count: int) -> list[Self]:
+    def read_sequence(cls: type[Self], buf: bytearray, offset: int, count: int) -> list[Self]:
         items: list[Self] = []
         if count < 1:
             return items
@@ -586,24 +593,26 @@ class AlignedString(Serializable):
         self.chars.append(0) # Null terminator
         self._alignment = alignment
 
-    @override
     def serialize_into(self, buf: ResizableBuffer, _unused: int | None=None):  # pyright: ignore[reportIncompatibleMethodOverride]
         return super().serialize_into(buf, self._alignment)
 
 
-class Ptr32[T: Serializable | Numeric.AnyNumeric](int, Serializable):
-    _src_buf: Buffer | None = None
-    _target_type: type[T] | None = None
-    _result_cache: T | None = None
-    _arr_result_cache: list[T] | None = None
+P = TypeVar("P", bound=Serializable | Numeric.AnyNumeric)
+PX = TypeVar("PX", bound=Serializable | Numeric.AnyNumeric)
 
-    def set_src_buf(self, buf: Buffer):
+class Ptr32(int, Serializable, Generic[P]):
+    _src_buf: bytearray | None = None
+    _target_type: type[P] | None = None
+    _result_cache: P | None = None
+    _arr_result_cache: list[P] | None = None
+
+    def set_src_buf(self, buf: bytearray):
         self._src_buf = buf
 
-    def set_target_type(self, tp: type[T]):
+    def set_target_type(self, tp: type[P]):
         self._target_type = tp
 
-    def deref(self) -> T:
+    def deref(self) -> P:
         if self._result_cache is not None:
             return self._result_cache
         if self._target_type is None:
@@ -615,11 +624,11 @@ class Ptr32[T: Serializable | Numeric.AnyNumeric](int, Serializable):
         else:
             fmt = Numeric.format_of_type(self._target_type)
             assert(fmt)
-            result = cast(tuple[T], unpack_from(fmt, self._src_buf, int(self)))[0]
+            result = cast(tuple[P], unpack_from(fmt, self._src_buf, int(self)))[0]
         self._result_cache = result
         return result
 
-    def deref_array(self, count: int) -> list[T]:
+    def deref_array(self, count: int) -> list[P]:
         if self._arr_result_cache is not None:
             return self._arr_result_cache
         if self._target_type is None:
@@ -631,19 +640,19 @@ class Ptr32[T: Serializable | Numeric.AnyNumeric](int, Serializable):
         else:
             fmt = Numeric.format_of_type(self._target_type, count)
             assert(fmt)
-            result = list(cast(tuple[T, ...], unpack_from(fmt, self._src_buf, int(self))))
+            result = list(cast(tuple[P, ...], unpack_from(fmt, self._src_buf, int(self))))
         self._arr_result_cache = result
         return result
 
-    def retype[X: Serializable | Numeric.AnyNumeric](self, new_type: type[X]) -> "Ptr32[X]":
+    def retype(self, new_type: type[PX]) -> "Ptr32[PX]":
         new_ptr = Ptr32[new_type](int(self))
         new_ptr.set_target_type(new_type)
         if self._src_buf is not None:
             new_ptr.set_src_buf(self._src_buf)
         return new_ptr
 
-    def clone(self, new_value: int) -> "Ptr32[T]":
-        new_ptr = Ptr32[T](new_value)
+    def clone(self, new_value: int) -> "Ptr32[P]":
+        new_ptr = Ptr32[P](new_value)
         if self._target_type is not None:
             new_ptr.set_target_type(self._target_type)
         if self._src_buf is not None:

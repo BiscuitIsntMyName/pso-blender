@@ -1,4 +1,4 @@
-from typing import cast, final, override
+from typing import cast, final
 import bpy
 from bpy.props import EnumProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context
@@ -32,11 +32,9 @@ class NjcmNodeSettingsPanel(bpy.types.Panel):
     bl_context = "object"
 
     @classmethod
-    @override
     def poll(cls, context: Context):
         return context.object is not None
     
-    @override
     def draw(self, context: Context):
         if self.layout is not None and context.object is not None:
             settings = cast(ObjectWithNjcmSettings, context.object).njcm_settings

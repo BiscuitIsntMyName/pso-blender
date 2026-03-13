@@ -1,5 +1,5 @@
 import os, bpy
-from typing import cast, final, override
+from typing import cast, final
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
@@ -28,7 +28,6 @@ class ImportXj(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMet
         options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH")
 
-    @override
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         xj_path = None
         xvm_path = None

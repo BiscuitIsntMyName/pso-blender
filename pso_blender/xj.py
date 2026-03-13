@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import ClassVar, TypeGuard, cast, final
+from typing import ClassVar, TypeAlias, TypeGuard, cast, final
 import bpy, os, bmesh
 from dataclasses import dataclass, field
 
@@ -7,7 +7,7 @@ from bpy.types import Collection, FloatColorAttribute, Material
 
 from .njcm_node_properties_menu import ObjectWithNjcmSettings
 from .rel_properties_menu import ObjectWithRelSettings
-from .xj_material_properties_menu import MaterialWithXjSettings
+from .xj_material_properties_menu import MaterialWithXjSettings, TextureAddressingMode, NormalType
 from .serialization import Serializable, Numeric, AlignedString, Ptr32
 from struct import pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
@@ -246,39 +246,6 @@ class VertexBufferContainer(Serializable):
     vertex_count: U32 = 0
 
 
-@dataclass
-@final
-class BlendMode:
-    # Not the actual d3d enum values, but indices into an array containing the enum values
-    D3DBLEND_ZERO = 0
-    D3DBLEND_ONE = 1
-    D3DBLEND_SRCCOLOR = 2
-    D3DBLEND_INVSRCCOLOR = 3
-    D3DBLEND_SRCALPHA = 4
-    D3DBLEND_INVSRCALPHA = 5
-    D3DBLEND_DESTALPHA = 6
-    D3DBLEND_INVDESTALPHA = 7
-    D3DBLEND_DESTCOLOR = 8
-    D3DBLEND_INVDESTCOLOR = 9
-
-
-@dataclass
-@final
-class TextureAddressingMode:
-    D3DTADDRESS_WRAP = 3
-    D3DTADDRESS_MIRROR = 4
-    D3DTADDRESS_CLAMP = 5
-    D3DTADDRESS_BORDER = 6
-    D3DTADDRESS_MIRRORONCE = 7
-
-
-@dataclass
-@final
-class MaterialColorSource:
-    D3DMCS_MATERIAL = 0
-    D3DMCS_COLOR1 = 1
-    D3DMCS_COLOR2 = 3
-
 
 @dataclass
 @final
@@ -333,13 +300,6 @@ class XjMeshTreeNode(MeshTreeNode[XjMesh]):
     mesh: Ptr32[XjMesh] = Ptr32(NULLPTR)
     child: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
     next: Ptr32["XjMeshTreeNode"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
-
-
-@dataclass
-@final
-class NormalType:
-    Vertex = 1
-    Face = 2
 
 
 @dataclass
@@ -400,7 +360,8 @@ def get_vertex_constructor(vertex_format: int):
     vertex_format = vertex_format & 0xffff
     return ctors[vertex_format - 1]
 
-type VertexFactory =  Callable[[VertexAttributes],
+
+VertexFactory: TypeAlias = Callable[[VertexAttributes],
     VertexFormat1 |
     VertexFormat2 |
     VertexFormat3 |

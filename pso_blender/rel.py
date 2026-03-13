@@ -1,8 +1,11 @@
 from struct import pack_into, unpack_from
-from typing import cast, final, override
+from typing import cast, final, TypeVar
 from warnings import warn
 from .serialization import Serializable, ResizableBuffer, Numeric
 from .util import AbstractFileArchive
+
+
+T = TypeVar("T", bound=Serializable)
 
 
 @final
@@ -27,7 +30,6 @@ class Rel(AbstractFileArchive):
         self.pointer_offsets: list[int] = []
         self.warned_misalignment = False
 
-    @override
     def write(self, item: Serializable, ensure_aligned: bool=False) -> int:
         item_offset = item.serialize_into(self.buf, Rel.ALIGNMENT if ensure_aligned else None)
         if not self.warned_misalignment and self.buf.offset % Rel.ALIGNMENT != 0:
@@ -84,7 +86,7 @@ class Rel(AbstractFileArchive):
 
         return rel
     
-    def read[T: Serializable](self, cls: type[T], offset: int=0) -> tuple[T, int]:
+    def read(self, cls: type[T], offset: int=0) -> tuple[T, int]:
         return cls.deserialize_from(self.buf.buffer, offset)
     
     def is_nonnull_pointer(self, offset: int) -> bool:

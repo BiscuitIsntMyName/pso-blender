@@ -1,12 +1,14 @@
 from collections.abc import Sequence
 import math
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
 import bpy.types 
-from dataclasses import field
 from abc import ABC, abstractmethod
 
 from .serialization import Serializable
+
+
+T = TypeVar("T", bound=int | float)
 
 
 def mesh_faces(mesh: bpy.types.Mesh) -> list[tuple[int, int, int]]:
@@ -71,10 +73,6 @@ def magic_bytes(s: str) -> list[int]:
     return list(map(ord, s))
 
 
-def magic_field(s: str):
-    return field(default_factory=lambda: magic_bytes(s))
-
-
 def from_blender_axes(tup: Sequence[float] | Vector | Euler, invert_z: bool=True) -> Vector:
     """Swaps second and third component"""
     x, z, y = tup
@@ -97,7 +95,7 @@ def geometry_world_center(obj: bpy.types.Object) -> Vector:
     return obj.matrix_world @ local
 
 
-def clamp[T: int | float](n: T, min_val: T, max_val: T) -> T:
+def clamp(n: T, min_val: T, max_val: T) -> T:
     return max(min(n, max_val), min_val)
 
 

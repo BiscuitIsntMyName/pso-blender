@@ -50,7 +50,7 @@ class BmlHeader(Serializable):
 
 @dataclass
 class FileDescription(Serializable):
-    name: FixedArray[U8, Literal[32]] = field(default_factory=list)
+    name: FixedArray[U8, Literal[32]] = field(default_factory=FixedArray)
     compressed_size: U32 = 0
     unk1: U32 = 0
     decompressed_size: U32 = 0

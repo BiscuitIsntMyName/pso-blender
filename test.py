@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Final, Literal, ReadOnly, Self, cast
+from typing import Generic, Literal, Self, TypeVar, cast
 import unittest
 from pso_blender.serialization import Ptr32, Serializable, Numeric, ResizableBuffer, FixedArray
 
@@ -38,8 +38,8 @@ class MyUnalignedStruct(Serializable):
 class MyPointingStruct(Serializable):
     data_count: U32 = 0
     data: list[U8] = field(default_factory=list)
-    child: Ptr32[MyPointingStruct] = Ptr32(NULLPTR)
-    sibling: Ptr32[MyPointingStruct] = Ptr32(NULLPTR)
+    child: Ptr32["MyPointingStruct"] = Ptr32(NULLPTR)
+    sibling: Ptr32["MyPointingStruct"] = Ptr32(NULLPTR)
 
 
 @dataclass
@@ -50,7 +50,7 @@ class MyBufferStruct(Serializable):
 
 @dataclass
 class MyFixedArrayStruct(Serializable):
-    name: FixedArray[U8, Literal[16]] = field(default_factory=list)
+    name: FixedArray[U8, Literal[16]] = field(default_factory=FixedArray)
     flags: U32 = 0
 
 
@@ -59,8 +59,11 @@ class MyOtherPointingStruct(Serializable):
     data: Ptr32[MyBasicStruct] = Ptr32(NULLPTR)
 
 
+T = TypeVar("T", bound=Serializable)
+
+
 @dataclass
-class MyRecursiveGenericStruct[T: Serializable](Serializable):
+class MyRecursiveGenericStruct(Serializable, Generic[T]):
     data: Ptr32[T] = Ptr32(NULLPTR)
     bar: U8 = 0
     child: Ptr32[Self] = Ptr32(NULLPTR)
@@ -70,7 +73,7 @@ class MyRecursiveGenericStruct[T: Serializable](Serializable):
 @dataclass
 class MySpecializedRecursiveGenericStruct(MyRecursiveGenericStruct[MyBasicStruct]):
     data: Ptr32[MyBasicStruct] = Ptr32(NULLPTR)
-    child: Ptr32[MySpecializedRecursiveGenericStruct] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
+    child: Ptr32["MySpecializedRecursiveGenericStruct"] = Ptr32(NULLPTR)  # pyright: ignore[reportIncompatibleVariableOverride]
 
 
 class TestSerialization(unittest.TestCase):
@@ -131,7 +134,7 @@ class TestSerialization(unittest.TestCase):
     
     def test_fixed_array(self):
         buf = ResizableBuffer(size=0)
-        item = MyFixedArrayStruct(name=list(str.encode("deadbeef")), flags=0xdeadbeef)
+        item = MyFixedArrayStruct(name=FixedArray(str.encode("deadbeef")), flags=0xdeadbeef)
         _ = item.serialize_into(buf)
         self.assertEqual(buf.buffer[0:8], b"deadbeef")
         self.assertEqual(buf.buffer[8:16], b"\0\0\0\0\0\0\0\0")
@@ -140,7 +143,7 @@ class TestSerialization(unittest.TestCase):
 
 class TestDeserialization(unittest.TestCase):
     def test_basic_struct_deserialize(self):
-        buf = b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
+        buf = bytearray(b"\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f")
         (result, offset) = MyBasicStruct.deserialize_from(buf)
         self.assertEqual(offset, 12)
         self.assertEqual(result.x, 1.0)
@@ -148,13 +151,13 @@ class TestDeserialization(unittest.TestCase):
         self.assertEqual(result.z, 1.0)
 
     def test_fixed_array(self):
-        buf = b"deadbeef\0\0\0\0\0\0\0\0\xef\xbe\xad\xde"
+        buf = bytearray(b"deadbeef\0\0\0\0\0\0\0\0\xef\xbe\xad\xde")
         (result, _offset) = MyFixedArrayStruct.deserialize_from(buf)
         self.assertEqual(bytes(result.name[0:8]).decode(), "deadbeef")
         self.assertEqual(result.flags, 0xdeadbeef)
 
     def test_deref_pointer(self):
-        buf = b"\x04\x00\x00\x00\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f"
+        buf = bytearray(b"\x04\x00\x00\x00\x00\x00\x80\x3f\x00\x00\x80\x3f\x00\x00\x80\x3f")
         (root_struct, _offset) = MyOtherPointingStruct.deserialize_from(buf)
         self.assertEqual(root_struct.data, 4)
         pointee = root_struct.data.deref()
@@ -170,6 +173,7 @@ class TestDeserialization(unittest.TestCase):
         buf += b"\x00\x00\x00\x00" # MyRecursiveGenericStruct.data
         buf += b"\x05" # MyRecursiveGenericStruct.bar
         buf += b"\x00\x00\x00\x00" # MyRecursiveGenericStruct.child
+        buf = bytearray(buf)
         (root_struct, _offset) = MySpecializedRecursiveGenericStruct.deserialize_from(buf, offset=12)
         self.assertEqual(root_struct.data.deref().x, 1.0)
         self.assertEqual(root_struct.bar, 7)

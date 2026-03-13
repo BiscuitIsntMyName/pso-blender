@@ -1,5 +1,5 @@
 import math, os
-from typing import Literal, cast, final, override
+from typing import Literal, cast, final
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
@@ -68,18 +68,16 @@ class Chunk(Serializable):
     animated_mesh_tree_count: U32 = 0
     flags: U32 = 0
 
-    @override
     def __hash__(self):
         return self.id
 
-    @override
     def __eq__(self, other: object) -> bool:
         return isinstance(other, Chunk) and self.id == other.id
 
 
 @dataclass
 class NrelFmt2(Serializable):
-    magic: FixedArray[U8, Literal[4]] = field(default_factory=list)
+    magic: FixedArray[U8, Literal[4]] = field(default_factory=FixedArray)
     unk1: U32 = 0
     chunk_count: U16 = 0
     unk2: U16 = 0
@@ -219,7 +217,7 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
 
 def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object]):
     rel = Rel()
-    nrel = NrelFmt2(magic=util.magic_bytes("fmt2"))
+    nrel = NrelFmt2(magic=FixedArray(util.magic_bytes("fmt2")))
     texture_man = xvm.TextureManager(objects)
     # Create chunks
     chunk_to_children = assign_objects_to_chunks(objects, chunk_markers)

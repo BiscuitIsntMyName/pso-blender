@@ -1,5 +1,5 @@
 import os
-from typing import cast, final, override
+from typing import cast, final
 from warnings import catch_warnings
 import bpy
 from bpy_extras.io_utils import ExportHelper
@@ -68,7 +68,6 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
                 chunk_markers.append(obj)
         return self.export_all(minimap_objs, render_objs, collision_objs, chunk_markers)
 
-    @override
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         with catch_warnings(record=True) as warnings:
             result = self.export_all_by_tags()

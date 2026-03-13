@@ -1,4 +1,4 @@
-from typing import cast, final, override
+from typing import cast, final
 import bpy, os
 from bpy_extras.io_utils import ExportHelper
 from bpy.types import Context, Operator
@@ -26,7 +26,6 @@ class ExportXj(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMet
 
     filepath: StringProperty(subtype="FILE_PATH")
 
-    @override
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         filepath = cast(str, self.filepath)
         noext, _ext = os.path.splitext(filepath)

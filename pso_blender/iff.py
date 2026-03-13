@@ -1,4 +1,4 @@
-from typing import Literal, cast, final, override
+from typing import Literal, cast, final
 from warnings import warn
 from struct import pack_into, unpack_from
 from dataclasses import dataclass, field
@@ -18,7 +18,7 @@ NULLPTR = Numeric.NULLPTR
 
 @dataclass
 class IffHeader(Serializable):
-    type_name: FixedArray[U8, Literal[4]] = field(default_factory=list)
+    type_name: FixedArray[U8, Literal[4]] = field(default_factory=FixedArray)
     body_size: U32 = 0
 
 
@@ -34,11 +34,10 @@ class IffChunk(util.AbstractFileArchive):
         self.pointer_offsets = []
         self.warned_misalignment = False
         header = IffHeader(
-            type_name=list(bytes(type_name, "ascii")),
+            type_name=FixedArray(bytes(type_name, "ascii")),
             body_size=0xdeadbeef) # Body size is not known yet, we will write it here at the end
         _ = header.serialize_into(self.buf)
 
-    @override
     def write(self, item: Serializable, ensure_aligned: bool=False) -> int:
         header_size = IffHeader.type_size()
         # Subtract header to make pointers relative to body
@@ -65,7 +64,7 @@ class IffChunk(util.AbstractFileArchive):
         # Write pointer table header
         pof0_offset = self.buf.offset
         pof0_header = IffHeader(
-            type_name=list(bytes("POF0", "ascii")),
+            type_name=FixedArray(bytes("POF0", "ascii")),
             body_size=0xdeadbeef) # Body size is not known yet, we will write it here at the end
         _ = pof0_header.serialize_into(self.buf)
         # Write pointer table

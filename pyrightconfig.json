@@ -2,8 +2,10 @@
     "reportExplicitAny": false,
     "reportAny": false,
     "reportIgnoreCommentWithoutRule": false,
+    "reportImplicitOverride": false,
     "ignore": [
         "pso_blender/tristrip/*",
         "**/site-packages/**"
     ],
+    "stubPath": "lib"
 }

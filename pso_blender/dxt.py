@@ -1,8 +1,8 @@
 import functools, multiprocessing, struct
-from typing import cast
+from typing import cast, TypeAlias
 
 
-type RGB = tuple[int, int, int]
+RGB: TypeAlias = tuple[int, int, int]
 
 
 def rgb8_to_rgb565(rgb: RGB) -> int:

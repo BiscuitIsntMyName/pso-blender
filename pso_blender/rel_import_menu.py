@@ -1,4 +1,4 @@
-from typing import cast, final, override
+from typing import cast, final
 import bpy, os, re
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Context, Operator
@@ -27,7 +27,6 @@ class ImportRel(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
         options={"HIDDEN", "SKIP_SAVE"})
     directory: StringProperty(subtype="DIR_PATH")
 
-    @override
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         collection = None
         selected_files = cast(bpy.types.OperatorFileListElement, self.files)

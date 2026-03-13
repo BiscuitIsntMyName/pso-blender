@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import bpy
 import bpy.types
 from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
-from .util import magic_field, Texture, get_object_diffuse_textures
+from .util import magic_bytes, Texture, get_object_diffuse_textures
 from .iff import IffHeader
 
 
@@ -70,7 +70,7 @@ class XvrFlags:
 
 @dataclass
 class Xvr(Serializable):
-    magic: FixedArray[U8, Literal[4]] = magic_field("XVRT")
+    magic: FixedArray[U8, Literal[4]] = field(default_factory=lambda: FixedArray(magic_bytes("XVRT")))
     body_size: U32 = 0
     flags: U32 = 0
     format: U32 = 0
@@ -93,7 +93,7 @@ XVM_ITEM_ALIGNMENT = 64
 
 @dataclass
 class Xvm(Serializable):
-    magic: FixedArray[U8, Literal[4]] = magic_field("XVMH")
+    magic: FixedArray[U8, Literal[4]] = field(default_factory=lambda: FixedArray(magic_bytes("XVMH")))
     body_size: U32 = 0
     xvr_count: U32 = 0
     unk1: U32 = 0
@@ -246,7 +246,7 @@ def save_cache_index(path: str, index: dict[str, str]):
 def get_cached_xvr(path: str) -> Xvr:
     print("XVM Notice: Loading texture from cache '{}'".format(path))
     with open(path, "rb") as f:
-        file_contents = f.read()
+        file_contents = bytearray(f.read())
         (xvr, offset) = Xvr.deserialize_from(file_contents)
         xvr.data = file_contents[offset:]  # pyright: ignore[reportAttributeAccessIssue]
     return xvr
