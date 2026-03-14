@@ -159,9 +159,9 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
             warn("N.REL Warning: Distance between objects in chunk '{}' might be too large (expected maximum distance of {:.1f}, was {:.1f}).".format(
                     coll_name, max_chunk_radius, chunk.radius))
 
-    if len(chunk_markers) < 1:
+    if len(chunk_markers) < 1 and len(ungrouped_objects) > 0:
         # No markers, put all meshes in the same chunk at 0,0,0
-        warn("N.REL Warning: No chunk markers found in scene. Placing all meshes in default chunk.")
+        warn("N.REL Warning: No chunk markers found in scene. Placing all ungrouped meshes in default chunk.")
         chunk_to_children[always_rendered_chunk] += ungrouped_objects
         always_rendered_chunk.static_mesh_tree_count += len(ungrouped_objects)
         return chunk_to_children
