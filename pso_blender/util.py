@@ -1,6 +1,7 @@
 from collections.abc import Sequence
+from functools import cache
 import math
-from typing import Any, TypeVar, cast
+from typing import Any, ClassVar, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
 import bpy.types 
 from abc import ABC, abstractmethod
@@ -29,6 +30,8 @@ class Texture:
     image: bpy.types.Image
     animation_frames: int
 
+    _alpha_check_cache: ClassVar[dict[str, bool]] = dict()
+
     def __init__(self, *, id: int, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
         self.name = image.filepath_from_user() or image.name # Path can be empty if texture was created programmatically
@@ -38,15 +41,20 @@ class Texture:
         self.animation_frames = animation_frames
         # Check if texture uses alpha
         self.has_alpha = image.channels == 4
-        if self.has_alpha:
+        if self.name in Texture._alpha_check_cache:
+            self.has_alpha = Texture._alpha_check_cache[self.name]
+        elif self.has_alpha:
+            # This is a surprisingly slow operation so let's use a cache
             pixels = list(cast(Any, image.pixels))
             self.has_alpha = False
             for i in range(0, len(pixels), 4):
                 if pixels[i + 3] < 1:
                     self.has_alpha = True
                     break
+            Texture._alpha_check_cache[self.name] = self.has_alpha
 
 
+@cache # This is a surprisingly slow operation so let's use a cache
 def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
     """Assumes the first image node of each material is the correct one"""
     # Avoid circular dependency
