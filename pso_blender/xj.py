@@ -964,6 +964,9 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
     obj_name = "{}_node_{}".format(name, node_id)
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
+    if len(combined_mesh.color_attributes) > 0:
+        # Color attribute needs to be activated to make it render in viewport
+        combined_mesh.color_attributes.active_color_index = 0
     obj = bpy.data.objects.new(obj_name, combined_mesh)
     rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
     rel_settings.is_translucent = has_translucent_flag
