@@ -121,6 +121,7 @@ class Xvm(Serializable):
 class TextureManager:
     _base_id: int
     _textures_by_name: dict[str, Texture]
+    _has_anim_tex: bool = False
 
     def __init__(self, objects: list[bpy.types.Object]):
         # Create "unique" texture IDs
@@ -134,9 +135,11 @@ class TextureManager:
             textures = get_object_diffuse_textures(obj)
             for tex in textures:
                 if tex.image.source == "SEQUENCE":
+                    self._has_anim_tex = True
                     # Get animated textures
                     frames = get_image_sequence_images(tex.image)
                     tex.animation_frames = len(frames)
+                    all_textures.append(tex)
                     for frame in frames:
                         all_textures.append(
                             Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
@@ -180,10 +183,7 @@ class TextureManager:
         return len(get_object_diffuse_textures(obj)) > 0
     
     def has_animated_textures(self) -> bool:
-        for key in self._textures_by_name:
-            if self._textures_by_name[key].image.source == "SEQUENCE":
-                return True
-        return False
+        return self._has_anim_tex
     
     def get_object_animated_texture(self, obj: bpy.types.Object) -> Texture | None:
         for tex in self.get_object_textures(obj):
