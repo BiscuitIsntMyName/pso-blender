@@ -1,3 +1,4 @@
+import bpy
 import os
 from typing import cast, final
 from bpy_extras.io_utils import ExportHelper
@@ -29,5 +30,7 @@ class ExportBml(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
     def execute(self, context: Context):
         filepath = cast(str, self.filepath)
         noext, _ext = os.path.splitext(filepath)
-        bml.write(filepath, noext + ".xvm")
+        # Valid objects are top-level objects that either have a mesh or are empty
+        objs = [obj for obj in bpy.data.objects if obj.parent is None and (obj.type == "MESH" or obj.type == "EMPTY")]
+        bml.write(filepath, noext + ".xvm", objs)
         return {"FINISHED"}

@@ -1,6 +1,5 @@
 from typing import final
 import bpy
-from warnings import warn
 from struct import pack_into
 from dataclasses import dataclass
 
@@ -73,55 +72,63 @@ class Motion(Serializable):
     factor_count: U16 = 0 # Also contains some other flags
 
 
-def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearray:
+def get_object_actions(obj: bpy.types.Object) -> list[bpy.types.Action]:
+    if not obj.animation_data:
+        return []
+    compatible_actions: list[bpy.types.Action] = []
+    for action in bpy.data.actions:
+        for slot in action.slots:
+            if slot in list(obj.animation_data.action_suitable_slots):
+                compatible_actions.append(action)
+    return compatible_actions
+
+
+def get_object_hierarchy_in_pso_order(obj: bpy.types.Object) -> list[bpy.types.Object]:
+    """Order is depth first, first sibling first. Includes self."""
+    ordered_nodes: list[bpy.types.Object] = []
+    stack: list[bpy.types.Object] = [obj]
+    while len(stack) > 0:
+        cur = stack.pop()
+        ordered_nodes.append(cur)
+        stack += reversed(cur.children)
+    return ordered_nodes
+
+
+def make_njm(root_node: bpy.types.Object) -> bytearray:
     """Returns finished IffChunk"""
     if bpy.context.scene is None:
         raise Exception("NJCM error: Blender has no scene")
-    for obj in bpy.data.objects:
-        if obj.type == "ARMATURE":
-            armature = obj
-            break
-    else:
-        raise Exception("NJM error: Object has no armature")
+    world_scale = util.get_pso_world_scale()
     orig_frame = bpy.context.scene.frame_current
-    if armature.animation_data is None:
-        raise Exception("NJM error: Armature has no animation data")
-    orig_action = armature.animation_data.action
-    armature.animation_data.action = action
-    # Check what kind of transforms animation contains
-    has_translation = False
-    has_rotation = False
-    has_scaling = False
-    for fcurve in action.fcurves:
-        if fcurve.data_path.endswith("location"):
-            has_translation = True
-        elif fcurve.data_path.endswith("rotation_quaternion"):
-            has_rotation = True
-        elif fcurve.data_path.endswith("scale"):
-            has_scaling = True
-        else:
-            warn("NJM: Unsupported fcurve type '{}'".format(fcurve.data_path))
+    ordered_nodes = get_object_hierarchy_in_pso_order(root_node)
+    ordered_actions = [next(iter(get_object_actions(o)), None) for o in ordered_nodes]
+    longest_duration = max(0 if not a else int(a.frame_range[1] - a.frame_range[0]) for a in ordered_actions)
     # Create chunk
+    # Always include translation, rotation, and scaling, because it's easier to do
     nmdm_chunk = IffChunk("NMDM")
     motion = Motion(
         nodes_to_keyframes=Ptr32(0xdeadbeef),
-        frame_count=int(action.frame_range[1] - action.frame_range[0]),
+        frame_count=longest_duration,
         motion_flags=MotionFlag.NJD_MTYPE_POS_0 | MotionFlag.NJD_MTYPE_ANG_1 | MotionFlag.NJD_MTYPE_SCL_2,
         factor_count=3)
     # Write this pointer later
     nodes_to_keyframes_ptr_offset = nmdm_chunk.write(motion) + IffHeader.type_size() + 0
     mdatas: list[MData3] = []
-    # Iterate model nodes
-    for obj in objs:
+    # Iterate model nodes and create an mdata for each one
+    for (node, action) in zip(ordered_nodes, ordered_actions):
+        if not action:
+            # Add empty track
+            mdatas.append(MData3())
+            continue
         translations: list[Vector] = []
         rotations: list[Vector] = []
         scalings: list[Vector] = []
         # Play animation in scene to have blender automatically apply animation transforms to object
         for frame_num in range(int(action.frame_range[0]), int(action.frame_range[1] + 1)):
             bpy.context.scene.frame_set(frame_num)
-            translations.append(util.from_blender_axes(obj.matrix_world.to_translation(), False))
-            rotations.append(util.from_blender_axes(obj.matrix_world.to_euler(), False))
-            scalings.append(util.from_blender_axes(obj.matrix_world.to_scale(), False))
+            translations.append(util.from_blender_axes(node.matrix_world.to_translation()) * world_scale)
+            rotations.append(util.from_blender_axes(node.matrix_world.to_euler()))
+            scalings.append(util.from_blender_axes(node.matrix_world.to_scale()))
         first_trans_ptr = NULLPTR
         first_rot_ptr = NULLPTR
         first_scale_ptr = NULLPTR
@@ -168,5 +175,4 @@ def make_njm(objs: list[bpy.types.Object], action: bpy.types.Action) -> bytearra
     pack_into(Numeric.endianness_prefix + "L", nmdm_chunk.buf.buffer, nodes_to_keyframes_ptr_offset, first_mdata_ptr)
     # Restore original scene state
     bpy.context.scene.frame_set(orig_frame)
-    armature.animation_data.action = orig_action
     return nmdm_chunk.finish()
