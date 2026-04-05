@@ -123,12 +123,16 @@ def make_njm(root_node: bpy.types.Object) -> bytearray:
         translations: list[Vector] = []
         rotations: list[Vector] = []
         scalings: list[Vector] = []
+        bpy.context.scene.frame_set(0)
+        start_scale = util.from_blender_axes(node.matrix_world.to_scale())
         # Play animation in scene to have blender automatically apply animation transforms to object
         for frame_num in range(int(action.frame_range[0]), int(action.frame_range[1] + 1)):
             bpy.context.scene.frame_set(frame_num)
             translations.append(util.from_blender_axes(node.matrix_world.to_translation()) * world_scale)
             rotations.append(util.from_blender_axes(node.matrix_world.to_euler()))
-            scalings.append(util.from_blender_axes(node.matrix_world.to_scale()))
+            # Make scalings relative to scale at start
+            scale_now = util.from_blender_axes(node.matrix_world.to_scale())
+            scalings.append(Vector((1.0, 1.0, 1.0)) + (scale_now - start_scale))
         first_trans_ptr = NULLPTR
         first_rot_ptr = NULLPTR
         first_scale_ptr = NULLPTR
