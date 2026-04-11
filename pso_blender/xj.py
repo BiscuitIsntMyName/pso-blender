@@ -304,6 +304,7 @@ class XjMeshTreeNode(MeshTreeNode[XjMesh]):
 
 @dataclass
 class VertexAttributes:
+    idx: int = 0
     x: float = 0.0
     y: float = 0.0
     z: float = 0.0
@@ -316,6 +317,13 @@ class VertexAttributes:
     g: int = 0
     b: int = 0
     a: int = 0
+
+    def __hash__(self) -> int:
+        rounding = 5
+        return hash((self.idx,
+            round(self.u, rounding), round(self.v, rounding),
+            self.r, self.g, self.b, self.a,
+            round(self.nx, rounding), round(self.ny, rounding), round(self.nz, rounding)))
 
 
 def determine_vertex_format(has_textures: bool, has_vertex_colors: bool, use_normals: bool) -> int:
@@ -444,22 +452,43 @@ class VertexBuffer(Serializable):
     vertices: list[VertexBase] = field(default_factory=list)
 
 
-def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: XjMesh, has_textures: bool, vertex_colors: bpy.types.FloatColorAttribute | None, normal_type: int | None):
-    use_normals = normal_type is not None
+@dataclass
+class TempFace:
+    verts: tuple[int, int, int]
+    material_idx: int
 
-    # One vertex per loop
-    # TODO: Should only use per-loop vertices when necessary
+
+def write_vertex_buffer(
+    destination: util.AbstractFileArchive,
+    obj: bpy.types.Object,
+    blender_mesh: bpy.types.Mesh,
+    xj_mesh: XjMesh,
+    has_textures: bool,
+    vertex_colors: bpy.types.FloatColorAttribute | None,
+    normal_type: int | None) -> list[TempFace]:
+    """Returns triangles matching indices of created vertices"""
+
+    use_normals = normal_type is not None
     vertex_format = determine_vertex_format(has_textures, bool(vertex_colors), use_normals)
     create_vertex = get_vertex_factory(vertex_format)
 
     if cast(ObjectWithRelSettings, obj).rel_settings.is_translucent:
         vertex_format |= 0x10000
 
-    vertices: list[VertexBase | None] = [None] * len(blender_mesh.loops)
+    # If mesh has per-loop data then we must produce one vertex for each loop, otherwise one vertex for each vertex
+    has_per_loop_data = normal_type == NormalType.Face or (vertex_colors is not None and vertex_colors.domain == "CORNER")
+
+    # Our vertex list might not match blender's vertices and triangles if we split or deduplicate vertices
+    # so let's create new vertex and triangle lists
+    vertices: list[VertexBase] = []
+    triangles: list[TempFace] = []
+    vertex_registry: dict[VertexAttributes, int] = {}
+
     for face in blender_mesh.loop_triangles:
+        face_indices: list[int] = []
         for (vert_idx, loop_idx) in zip(face.vertices, face.loops):
             # Gather all required and optional vertex attributes
-            vertex_attributes = VertexAttributes()
+            vertex_attributes = VertexAttributes(idx=vert_idx)
             # Exclude translation from transform
             local_vert = blender_mesh.vertices[vert_idx]
             world_vert = obj.matrix_world @ local_vert.co
@@ -471,17 +500,20 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
             vertex_attributes.z = world_vert[2]
             # Get UVs
             if has_textures:
-                u, v = blender_mesh.uv_layers[0].data[loop_idx].uv
-                vertex_attributes.u = u
-                vertex_attributes.v = v
+                uv = blender_mesh.uv_layers[0].uv[loop_idx].vector
+                vertex_attributes.u = uv[0]
+                vertex_attributes.v = uv[1]
             # Get colors
             if vertex_colors:
-                if vertex_colors.domain == "POINT":
-                    col = vertex_colors.data[vert_idx].color
-                elif vertex_colors.domain == "CORNER":
-                    col = vertex_colors.data[loop_idx].color
+                if has_per_loop_data:
+                    if vertex_colors.domain == "POINT":
+                        col = vertex_colors.data[vert_idx].color
+                    elif vertex_colors.domain == "CORNER":
+                        col = vertex_colors.data[loop_idx].color
+                    else:
+                        raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 else:
-                    raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
+                    col = vertex_colors.data[vert_idx].color
                 # BGRA
                 # Need to clamp because light baking can cause values to go higher than normal
                 vertex_attributes.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
@@ -490,23 +522,30 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
                 vertex_attributes.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
             if use_normals:
                 # Vertex or face normal
-                normal = local_vert.normal if normal_type == NormalType.Vertex else face.normal
+                if has_per_loop_data:
+                    normal = local_vert.normal if normal_type == NormalType.Vertex else face.normal
+                else:
+                    # Face normals cannot be encoded as per-vertex data
+                    normal = local_vert.normal
                 normal = normal.to_4d()
                 normal.w = 0
                 normal = util.from_blender_axes((obj.matrix_world @ normal).to_3d().normalized())
                 vertex_attributes.nx = normal[0]
                 vertex_attributes.ny = normal[1]
                 vertex_attributes.nz = normal[2]
-            # Construct actual vertex from attributes
-            vertices[loop_idx] = create_vertex(vertex_attributes)
-
-    vertex_buffer = VertexBuffer()
-    for vert in vertices:
-        if vert is None:
-            raise Exception("XJ error in object '{}': Loop-vertex mismatch".format(obj.name))
-        vertex_buffer.vertices.append(vert)
+            # Can we reuse an existing vertex or do we need to create a new one?
+            if has_per_loop_data or vertex_attributes not in vertex_registry:
+                # Create new vertex
+                new_idx = len(vertices)
+                vertex_registry[vertex_attributes] = new_idx
+                # Construct actual vertex from attributes
+                vertices.append(create_vertex(vertex_attributes))
+            # Use new indices to create triangles
+            face_indices.append(vertex_registry[vertex_attributes])
+        triangles.append(TempFace(material_idx=face.material_index, verts=cast(tuple[int, int, int], tuple(face_indices))))
     
-    vertex_size = cast(VertexBase, vertices[0]).type_size()
+    vertex_size = vertices[0].type_size()
+    vertex_buffer = VertexBuffer(vertices=vertices)
 
     # Put all vertices in one buffer
     xj_mesh.vertex_buffer_count = 1
@@ -516,6 +555,7 @@ def write_vertex_buffer(destination: util.AbstractFileArchive, obj: bpy.types.Ob
         vertex_size=vertex_size,
         vertex_count=len(vertex_buffer.vertices))))
 
+    return triangles
 
 class MaterialStrips:
     material_index: int
@@ -539,7 +579,8 @@ class MaterialStrips:
         self.strips = strips
 
 
-def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> list[MaterialStrips]:
+def create_tristrips_grouped_by_material(obj: bpy.types.Object, triangles: list[TempFace], texture_man: xvm.TextureManager) -> list[MaterialStrips]:
+    """Returns vertex indices"""
     material_strips: list[MaterialStrips] = []
     if texture_man.object_has_textures(obj):
         material_faces: list[list[tuple[int, int, int]]] = []
@@ -549,24 +590,30 @@ def create_tristrips_grouped_by_material(obj: bpy.types.Object, blender_mesh: bp
         for (mat_idx, mat_slot) in enumerate(material_slots):
             material_faces.append([])
             material_strips.append(MaterialStrips(mat_idx, mat_slot.material, []))
-        for face in blender_mesh.loop_triangles:
-            material_faces[face.material_index].append((face.loops[0], face.loops[1], face.loops[2]))
+        for face in triangles:
+            material_faces[face.material_idx].append((face.verts[0], face.verts[1], face.verts[2]))
         for mat_idx in range(len(material_slots)):
             strips = cast(list[list[int]], tristrip.stripify(material_faces[mat_idx], stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
             material_strips[mat_idx].strips = strips
     else:
         faces: list[tuple[int, int, int]] = []
-        for face in blender_mesh.loop_triangles:
-            faces.append((face.loops[0], face.loops[1], face.loops[2]))
+        for face in triangles:
+            faces.append((face.verts[0], face.verts[1], face.verts[2]))
         strips = cast(list[list[int]], tristrip.stripify(faces, stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
         material_strips.append(MaterialStrips(-1, None, strips))
     return material_strips
 
 
-def write_index_buffers(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, xj_mesh: XjMesh, texture_man: xvm.TextureManager, has_vertex_alpha: bool):
+def write_index_buffers(
+    destination: util.AbstractFileArchive,
+    obj: bpy.types.Object,
+    triangles: list[TempFace],
+    xj_mesh: XjMesh,
+    texture_man: xvm.TextureManager,
+    has_vertex_alpha: bool):
     # Texture IDs must be 0-based for the render settings
     # One buffer per strip
-    material_strips = create_tristrips_grouped_by_material(obj, blender_mesh, texture_man)
+    material_strips = create_tristrips_grouped_by_material(obj, triangles, texture_man)
     opaque_index_buffer_containers: list[IndexBufferContainer] = []
     alpha_index_buffer_containers: list[IndexBufferContainer] = []
     textures = texture_man.get_object_textures(obj)
@@ -644,7 +691,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
         vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes[0])
     elif normal_type is not None:
         # Effects that need normals usually also need vcol. Let's add a blank white color attribute.
-        vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "CORNER"))
+        vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "POINT"))
         for attr in vertex_colors.data:
             attr.color[0] = 1
             attr.color[1] = 1
@@ -664,8 +711,8 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
                 has_vertex_alpha = True
                 break
     # Write various mesh data
-    write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.object_has_textures(obj), vertex_colors, normal_type)
-    write_index_buffers(destination, obj, blender_mesh, mesh, texture_man, has_vertex_alpha)
+    triangles = write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.object_has_textures(obj), vertex_colors, normal_type)
+    write_index_buffers(destination, obj, triangles, mesh, texture_man, has_vertex_alpha)
     return mesh
 
 
