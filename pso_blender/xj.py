@@ -841,6 +841,8 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
 
     vcol_node = cast(bpy.types.ShaderNodeVertexColor, mat.node_tree.nodes.new(type="ShaderNodeVertexColor"))
     vcol_node.layer_name = "vertex_color"
+    alpha_modulate_node = cast(bpy.types.ShaderNodeMath, mat.node_tree.nodes.new(type="ShaderNodeMath"))
+    alpha_modulate_node.operation = "MULTIPLY"
 
     mix_node = cast(bpy.types.ShaderNodeMix, mat.node_tree.nodes.new(type="ShaderNodeMix"))
     mix_node.data_type = "RGBA"
@@ -856,9 +858,13 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
 
     _ = mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
     _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
-    if tex_node is not None:
+    _ = mat.node_tree.links.new(vcol_node.outputs[1], alpha_modulate_node.inputs[0])
+    _ = mat.node_tree.links.new(alpha_modulate_node.outputs[0], shader_mix_node.inputs[0])
+    if tex_node is None:
+        cast(bpy.types.NodeSocketFloat, alpha_modulate_node.inputs[1]).default_value = 1.0
+    else:
         _ = mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
-        _ = mat.node_tree.links.new(tex_node.outputs[1], shader_mix_node.inputs[0])
+        _ = mat.node_tree.links.new(tex_node.outputs[1], alpha_modulate_node.inputs[1])
     _ = mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
     _ = mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
     _ = mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])
@@ -911,12 +917,12 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
     vertex_sets: list[list[tuple[float, float, float]]] = []
     normal_sets: list[list[list[float]]] = []
     uv_sets: list[list[tuple[float, float]]] = []
-    color_sets: list[list[tuple[int, int, int]]] = []
+    color_sets: list[list[tuple[int, int, int, int]]] = []
 
     has_translucent_flag = False
     for vertex_buffer in mesh.vertex_buffers.deref_array(mesh.vertex_buffer_count):
         vertices: list[tuple[float, float, float]] = []
-        colors: list[tuple[int, int, int]] = []
+        colors: list[tuple[int, int, int, int]] = []
         normals: list[list[float]] = []
         uvs: list[tuple[float, float]] = []
         if vertex_buffer.vertex_format & 0x10000:
@@ -927,7 +933,7 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
             if vertex_has_pos(vertex):
                 vertices.append((vertex.x, -vertex.z, vertex.y))
             if vertex_has_color(vertex):
-                colors.append((vertex.r, vertex.g, vertex.b))
+                colors.append((vertex.r, vertex.g, vertex.b, vertex.a))
             if vertex_has_normals(vertex):
                 normals.append([vertex.nx, -vertex.nz, vertex.ny])
             if vertex_has_uvs(vertex):
@@ -1002,6 +1008,7 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
                 color_attribute.data[i].color[0] = colors[i][0] / 0xff
                 color_attribute.data[i].color[1] = colors[i][1] / 0xff
                 color_attribute.data[i].color[2] = colors[i][2] / 0xff
+                color_attribute.data[i].color[3] = colors[i][3] / 0xff
 
         # Combine with other vertex buffers
         combined_bmesh.from_mesh(blender_mesh)
