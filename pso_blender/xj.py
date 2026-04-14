@@ -854,7 +854,16 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     else:
         tex_node = cast(bpy.types.ShaderNodeTexImage, mat.node_tree.nodes.new(type="ShaderNodeTexImage"))
         tex_node.image = img
-        tex_node.extension = "MIRROR"
+        if xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_WRAP:
+            tex_node.extension = "REPEAT"
+        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_MIRROR:
+            tex_node.extension = "MIRROR"
+        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_CLAMP:
+            tex_node.extension = "CLIP"
+        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_BORDER:
+            tex_node.extension = "CLIP"
+        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_MIRRORONCE:
+            tex_node.extension = "MIRROR"
 
     _ = mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
     _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
