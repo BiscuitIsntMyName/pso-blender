@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from typing import ClassVar, TypeAlias, TypeGuard, cast, final
-import bpy, os, bmesh
+import bpy, os, bmesh, math
 from dataclasses import dataclass, field
 
 from bpy.types import Collection, FloatColorAttribute, Material
@@ -881,6 +881,18 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     return mat
 
 
+def set_obj_transforms_from_xj_node(obj: bpy.types.Object, node: XjMeshTreeNode):
+    """Does not apply, only sets transforms"""
+    world_scale = util.get_pso_world_scale()
+    if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
+        obj.scale = (node.scale_x, node.scale_z, node.scale_y)
+    if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
+        obj.rotation_mode = "XZY"
+        obj.rotation_euler = (node.rot_x / 0x7fff * math.pi, node.rot_z / 0x7fff * -math.pi, node.rot_y / 0x7fff * math.pi)
+    if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
+        obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
+
+
 def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
@@ -1027,24 +1039,14 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
     obj_name = "{}_node_{}".format(name, node_id)
     combined_mesh = bpy.data.meshes.new(mesh_name)
     combined_bmesh.to_mesh(combined_mesh)
+    util.scale_mesh(combined_mesh, 1.0 / world_scale) # Apply world scale
     if len(combined_mesh.color_attributes) > 0:
         # Color attribute needs to be activated to make it render in viewport
         combined_mesh.color_attributes.active_color_index = 0
     obj = bpy.data.objects.new(obj_name, combined_mesh)
+    set_obj_transforms_from_xj_node(obj, node) # Set (not apply) transforms
     rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
     rel_settings.is_translucent = has_translucent_flag
-    # Apply transforms
-    scale = (1.0 / world_scale, 1.0 / world_scale, 1.0 / world_scale)
-    if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
-        scale = (node.scale_x / world_scale, -node.scale_z / world_scale, node.scale_y / world_scale)
-    obj.scale = scale
-    util.apply_transform(obj, use_scale=True)
-    if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
-        obj.rotation_euler = (node.rot_x / 0x7fff * 3.14, node.rot_z / 0x7fff * -3.14, node.rot_y / 0x7fff * 3.14)
-        util.apply_transform(obj, use_rotation=True)
-    if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
-        obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
-        util.apply_transform(obj, use_location=True)
 
     # Add material and vertex group for each index buffer
     for i, index_buffer in enumerate(all_index_buffers):
@@ -1060,7 +1062,6 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
 def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
 
-    world_scale = util.get_pso_world_scale()
     node_counter = 0
     # Iterate tree and create a blender object for each node
     # Nodes with meshes are turned into mesh objects and empty nodes into empty objects
@@ -1071,15 +1072,10 @@ def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None
 
         if node.mesh == NULLPTR:
             # Create empty object
-            obj = bpy.data.objects.new("node_{}".format(node_counter), None)
+            obj = bpy.data.objects.new("{}_node_{}".format(name, node_counter), None)
             obj.empty_display_type = "SPHERE"
             obj.empty_display_size = 0.01
-            if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
-                obj.scale = (node.scale_x, -node.scale_z, node.scale_y)
-            if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
-                obj.rotation_euler = (node.rot_x / 0x7fff * 3.14, node.rot_z / 0x7fff * -3.14, node.rot_y / 0x7fff * 3.14)
-            if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
-                obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
+            set_obj_transforms_from_xj_node(obj, node)
         else:
             obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
             obj["mesh_offset"] = hex(node.mesh.get_offset())

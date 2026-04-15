@@ -329,28 +329,18 @@ def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(path)
     world_scale = util.get_pso_world_scale()
 
-    chunk_markers = bpy.data.collections.new("chunk_markers")
-    collection.children.link(chunk_markers)
     for chunk in nrel.chunks.deref_array(nrel.chunk_count):
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
         chunk_coll["chunk_offset"] = hex(chunk.get_offset())
 
-        (chunk.y, chunk.z) = (-chunk.z, chunk.y)
-        chunk.x /= world_scale
-        chunk.y /= world_scale
-        chunk.z /= world_scale
-
-        bpy.ops.mesh.primitive_uv_sphere_add(
-            segments=4,
-            ring_count=4,
-            location=(chunk.x, chunk.y, chunk.z))
-        obj = cast(ObjectWithRelSettings, bpy.context.active_object)
-        obj.name = "chunk_marker_" + str(chunk.id)
-        obj.rel_settings.is_chunk = True
-        # Primitives get automatically added to default collection, remove it and add it to our collection
-        obj.users_collection[0].objects.unlink(obj)
-        chunk_markers.objects.link(obj)
+        chunk_root = bpy.data.objects.new("chunk_root_" + str(chunk.id), None)
+        chunk_root.empty_display_type = "SPHERE"
+        chunk_root.empty_display_size = 0.01
+        chunk_root.rotation_mode = "XZY"
+        chunk_root.rotation_euler = (chunk.rot_x / 0x7fff * math.pi, chunk.rot_z / 0x7fff * -math.pi, chunk.rot_y / 0x7fff * math.pi)
+        chunk_root.location = (chunk.x / world_scale, -chunk.z / world_scale, chunk.y / world_scale)
+        chunk_coll.objects.link(chunk_root)
 
         tree_counter = 0
         for tree in chunk.static_mesh_trees.deref_array(chunk.static_mesh_tree_count):
@@ -361,13 +351,9 @@ def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
             models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), root_node, nrel_xvm)
             for obj in models.objects:
                 if not obj.parent:
+                    # Make top-level objects children of chunk root object
+                    obj.parent = chunk_root
                     obj["tree_offset"] = hex(tree.get_offset())
-                    util.apply_transform(obj, use_location=True, use_rotation=True)
-                    obj.location = (
-                        chunk.x + obj.location.x,
-                        chunk.y + obj.location.y,
-                        chunk.z + obj.location.z)
-                    obj.rotation_euler = (chunk.rot_x / 0x7fff * 3.14, chunk.rot_z / 0x7fff * -3.14, chunk.rot_y / 0x7fff * 3.14)
 
                 rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
                 rel_settings.is_nrel = True
