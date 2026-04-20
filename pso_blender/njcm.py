@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Generic, Self, TypeVar, final
+from enum import Enum
+from typing import Generic, Self, TypeVar
 from .serialization import Serializable, Numeric, Ptr32
 
 
@@ -13,8 +14,7 @@ F32 = Numeric.F32
 NULLPTR = Numeric.NULLPTR
 
 
-@final
-class NinjaEvalFlag:
+class NinjaEvalFlag(Enum):
     UNIT_POS = 0b1 # Ignore translation
     UNIT_ANG = 0b10 # Ignore rotation
     UNIT_SCL = 0b100 # Ignore scaling

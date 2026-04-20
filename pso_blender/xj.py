@@ -7,7 +7,7 @@ from bpy.types import Collection, FloatColorAttribute, Material
 
 from .njcm_node_properties_menu import ObjectWithNjcmSettings
 from .rel_properties_menu import ObjectWithRelSettings
-from .xj_material_properties_menu import MaterialWithXjSettings, TextureAddressingMode, NormalType
+from .xj_material_properties_menu import MaterialWithXjSettings, TextureAddressingMode, NormalType, BlendMode, MaterialColorSource
 from .serialization import Serializable, Numeric, AlignedString, Ptr32
 from struct import pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
@@ -567,12 +567,12 @@ class MaterialStrips:
         if material:
             xj_settings = cast(MaterialWithXjSettings, material).xj_settings
             self.renderstate_args = make_renderstate_args(
-                blend_modes=(xj_settings.src_blend, xj_settings.dst_blend),
-                texture_addressing=(xj_settings.tex_addr_u, xj_settings.tex_addr_v),
+                blend_modes=(getattr(BlendMode, xj_settings.src_blend).value, getattr(BlendMode, xj_settings.dst_blend).value),
+                texture_addressing=(getattr(TextureAddressingMode, xj_settings.tex_addr_u).value, getattr(TextureAddressingMode, xj_settings.tex_addr_v).value),
                 lighting=xj_settings.lighting,
                 material=(xj_settings.material1, xj_settings.material2),
                 camera_space_normals=xj_settings.camera_space_normals,
-                diffuse_color_source=xj_settings.diffuse_color_source)
+                diffuse_color_source=getattr(MaterialColorSource, xj_settings.diffuse_color_source).value)
         else:
             # Empty slot
             self.renderstate_args = []
@@ -683,7 +683,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
             if not xj_settings.normal_type:
                 xj_settings.normal_type = str(NormalType.Vertex)
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
-            normal_type = int(xj_settings.normal_type)
+            normal_type = getattr(NormalType, xj_settings.normal_type)
             break
 
     vertex_colors: FloatColorAttribute | None = None
@@ -778,8 +778,8 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         arg1 = setting.arg1
         arg2 = setting.arg2
         if t == RenderStateType.BLEND_MODE:
-            xj_settings.src_blend = str(arg1)
-            xj_settings.dst_blend = str(arg2)
+            xj_settings.src_blend = BlendMode(arg1).name
+            xj_settings.dst_blend = BlendMode(arg2).name
         elif t == RenderStateType.TEXTURE_ID:
             tex_id = arg1
         elif t == RenderStateType.TEXTURE_ADDRESSING:
@@ -794,8 +794,8 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
                 TextureAddressingMode.D3DTADDRESS_CLAMP,
                 TextureAddressingMode.D3DTADDRESS_BORDER,
                 TextureAddressingMode.D3DTADDRESS_MIRRORONCE]
-            xj_settings.tex_addr_u = str(modes[arg1])
-            xj_settings.tex_addr_v = str(modes[arg2])
+            xj_settings.tex_addr_u = TextureAddressingMode(modes[arg1]).name
+            xj_settings.tex_addr_v = TextureAddressingMode(modes[arg2]).name
         elif t == RenderStateType.MATERIAL:
             xj_settings.material1 = arg1
             xj_settings.material2 = arg2
@@ -804,7 +804,7 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         elif t == RenderStateType.CAMERA_SPACE_NORMALS:
             xj_settings.camera_space_normals = bool(arg1)
         elif t == RenderStateType.MATERIAL_SOURCE:
-            xj_settings.diffuse_color_source = str(arg1)
+            xj_settings.diffuse_color_source = MaterialColorSource(arg1).name
     
     if tex_id is None or xj_xvm is None:
         img = None
@@ -884,12 +884,12 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
 def set_obj_transforms_from_xj_node(obj: bpy.types.Object, node: XjMeshTreeNode):
     """Does not apply, only sets transforms"""
     world_scale = util.get_pso_world_scale()
-    if (node.eval_flags & NinjaEvalFlag.UNIT_SCL) == 0:
+    if (node.eval_flags & NinjaEvalFlag.UNIT_SCL.value) == 0:
         obj.scale = (node.scale_x, node.scale_z, node.scale_y)
-    if (node.eval_flags & NinjaEvalFlag.UNIT_ANG) == 0:
+    if (node.eval_flags & NinjaEvalFlag.UNIT_ANG.value) == 0:
         obj.rotation_mode = "XZY"
         obj.rotation_euler = (node.rot_x / 0x7fff * math.pi, node.rot_z / 0x7fff * -math.pi, node.rot_y / 0x7fff * math.pi)
-    if (node.eval_flags & NinjaEvalFlag.UNIT_POS) == 0:
+    if (node.eval_flags & NinjaEvalFlag.UNIT_POS.value) == 0:
         obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
 
 
@@ -1080,7 +1080,7 @@ def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None
             obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
             obj["mesh_offset"] = hex(node.mesh.get_offset())
         
-        cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(str(x) for x in util.get_set_bits(node.eval_flags))
+        cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(NinjaEvalFlag(x).name for x in util.get_set_bits(node.eval_flags))
         obj["node_offset"] = hex(node.get_offset())
 
         collection.objects.link(obj)
@@ -1113,8 +1113,8 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
 
         # Transform eval flags from blender format into actual bitfield
         eval_flags = 0
-        for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
-            eval_flags |= int(x)
+        for flag_name in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
+            eval_flags |= getattr(NinjaEvalFlag, flag_name).value
 
         mesh_node = XjMeshTreeNode(
             eval_flags=eval_flags,

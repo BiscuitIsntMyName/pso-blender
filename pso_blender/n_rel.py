@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from warnings import warn
 import bpy.types
 
+from .njcm import NinjaEvalFlag
 from .njcm_node_properties_menu import ObjectWithNjcmSettings
 from .rel_properties_menu import ObjectWithRelSettings
 from .rel import Rel
@@ -258,8 +259,8 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
                     TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff)))
             
             eval_flags = 0
-            for x in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
-                eval_flags |= int(x)
+            for flag_name in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
+                eval_flags |= getattr(NinjaEvalFlag, flag_name).value
 
             mesh_world_pos = util.from_blender_axes(obj.location * util.get_pso_world_scale())
             mesh_node = xj.XjMeshTreeNode(

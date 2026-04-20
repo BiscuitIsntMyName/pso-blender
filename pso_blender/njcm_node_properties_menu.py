@@ -5,17 +5,26 @@ from bpy.types import Context
 from . import njcm
 
 
-def make_enum_prop_items(the_enum: object):
-    return [(str(the_enum.__dict__[name]), name, "", the_enum.__dict__[name])
-        for (_i, name) in enumerate(the_enum.__dict__) if not name.startswith("_")]
+NinjaEvalFlag_items = [
+    ("UNIT_POS", "UNIT_POS", "", njcm.NinjaEvalFlag.UNIT_POS.value),
+    ("UNIT_ANG", "UNIT_ANG", "", njcm.NinjaEvalFlag.UNIT_ANG.value),
+    ("UNIT_SCL", "UNIT_SCL", "", njcm.NinjaEvalFlag.UNIT_SCL.value),
+    ("HIDE", "HIDE", "", njcm.NinjaEvalFlag.HIDE.value),
+    ("BREAK", "BREAK", "", njcm.NinjaEvalFlag.BREAK.value),
+    ("ZXY_ANG", "ZXY_ANG", "", njcm.NinjaEvalFlag.ZXY_ANG.value),
+    ("SKIP", "SKIP", "", njcm.NinjaEvalFlag.SKIP.value),
+    ("SHAPE_SKIP", "SHAPE_SKIP", "", njcm.NinjaEvalFlag.SHAPE_SKIP.value),
+    ("CLIP", "CLIP", "", njcm.NinjaEvalFlag.CLIP.value),
+    ("MODIFIER", "MODIFIER", "", njcm.NinjaEvalFlag.MODIFIER.value),
+]
 
 
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class NjcmNodeSettings(bpy.types.PropertyGroup):
     eval_flags: EnumProperty(
         name="Eval Flags",
-        default={str(njcm.NinjaEvalFlag.UNIT_ANG), str(njcm.NinjaEvalFlag.UNIT_SCL), str(njcm.NinjaEvalFlag.BREAK)},
-        items=make_enum_prop_items(njcm.NinjaEvalFlag),
+        default={"UNIT_ANG", "UNIT_SCL", "BREAK"},
+        items=NinjaEvalFlag_items,
         options={"ENUM_FLAG", "ANIMATABLE"})
 
 
