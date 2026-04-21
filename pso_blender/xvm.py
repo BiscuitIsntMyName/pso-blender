@@ -129,6 +129,8 @@ class TextureManager:
         id_counter = self._base_id
         self._textures_by_name = dict()
 
+        get_object_diffuse_textures.cache_clear()
+
         # First find all textures in given objects
         all_textures: list[Texture] = []
         for obj in objects:

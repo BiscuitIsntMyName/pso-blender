@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from typing import ClassVar, TypeAlias, TypeGuard, cast, final
+from warnings import warn
 import bpy, os, bmesh, math
 from dataclasses import dataclass, field
 
@@ -684,7 +685,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
         xj_settings = cast(MaterialWithXjSettings, mat_slot.material).xj_settings
         if xj_settings.lighting or xj_settings.camera_space_normals:
             if not xj_settings.normal_type:
-                xj_settings.normal_type = str(NormalType.Vertex)
+                xj_settings.normal_type = NormalType.Vertex.name
             # XXX: Camera projection setting is applied to entire mesh instead of material vertex group
             normal_type = getattr(NormalType, xj_settings.normal_type)
             break
