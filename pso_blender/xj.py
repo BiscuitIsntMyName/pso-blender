@@ -546,6 +546,9 @@ def write_vertex_buffer(
     
     vertex_size = vertices[0].type_size()
     vertex_buffer = VertexBuffer(vertices=vertices)
+    vb_ptr_diff = vertex_size * len(vertices) // 4
+    if vb_ptr_diff >= 0xffff:
+        warn("XJ Warning: Mesh \"{}\" is too large to fit inside a REL file (mesh size is {}, maximum size is {})".format(obj.name, vb_ptr_diff, 0xffff))
 
     # Put all vertices in one buffer
     xj_mesh.vertex_buffer_count = 1

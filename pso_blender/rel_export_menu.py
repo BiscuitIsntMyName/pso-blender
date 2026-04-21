@@ -70,9 +70,11 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
 
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         with catch_warnings(record=True) as warnings:
-            result = self.export_all_by_tags()
-            # Display warnings in the GUI
-            for warning in warnings:
-                self.report({"WARNING"}, str(warning.message))
-                print(warning)
+            try:
+                result = self.export_all_by_tags()
+            finally:
+                # Display warnings in the GUI
+                for warning in warnings:
+                    self.report({"WARNING"}, str(warning.message))
+                    print(warning)
             return result
