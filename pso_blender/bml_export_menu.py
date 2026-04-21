@@ -31,6 +31,10 @@ class ExportBml(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         filepath = cast(str, self.filepath)
         noext, _ext = os.path.splitext(filepath)
         # Valid objects are top-level objects that either have a mesh or are empty
-        objs = [obj for obj in bpy.data.objects if obj.parent is None and (obj.type == "MESH" or obj.type == "EMPTY")]
+        view_layer = bpy.context.view_layer
+        if view_layer:
+            objs = [obj for obj in view_layer.objects if obj.parent is None and (obj.type == "MESH" or obj.type == "EMPTY")]
+        else:
+            return {"CANCELLED"}
         bml.write(filepath, noext + ".xvm", objs)
         return {"FINISHED"}

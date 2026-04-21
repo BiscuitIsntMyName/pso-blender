@@ -56,16 +56,20 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         collision_objs: list[Object] = []
         minimap_objs: list[Object] = []
         chunk_markers: list[Object] = []
-        for obj in bpy.data.objects:
-            obj = cast(ObjectWithRelSettings, obj)
-            if obj.rel_settings.is_nrel:
-                render_objs.append(obj)
-            if obj.rel_settings.is_crel:
-                collision_objs.append(obj)
-            if obj.rel_settings.is_rrel:
-                minimap_objs.append(obj)
-            if obj.rel_settings.is_chunk:
-                chunk_markers.append(obj)
+        view_layer = bpy.context.view_layer
+        if view_layer:
+            for obj in view_layer.objects:
+                obj = cast(ObjectWithRelSettings, obj)
+                if obj.rel_settings.is_nrel:
+                    render_objs.append(obj)
+                if obj.rel_settings.is_crel:
+                    collision_objs.append(obj)
+                if obj.rel_settings.is_rrel:
+                    minimap_objs.append(obj)
+                if obj.rel_settings.is_chunk:
+                    chunk_markers.append(obj)
+        else:
+            return {"CANCELLED"}
         return self.export_all(minimap_objs, render_objs, collision_objs, chunk_markers)
 
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
