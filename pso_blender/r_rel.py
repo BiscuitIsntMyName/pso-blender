@@ -74,7 +74,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         for local_vert in blender_mesh.vertices:
             # Apply transforms from object but translate position back to local
             world_vert = util.from_blender_axes(obj.matrix_world @ local_vert.co) * util.get_pso_world_scale() - geom_center
-            farthest_sq = max(farthest_sq, util.distance_squared(geom_center.to_tuple(), world_vert.to_tuple()))
+            farthest_sq = max(farthest_sq, world_vert.xz.length_squared)
             vertices.append(Vertex(
                 x=world_vert[0], y=world_vert[1], z=world_vert[2],
                 nx=0.0, ny=1.0, nz=0.0))
@@ -82,10 +82,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         strips = cast(list[list[int]], tristrip.stripify(faces, stitchstrips=True))  # pyright: ignore[reportUnknownMemberType]
 
         container = MeshContainer()
-        mesh = NjMesh(
-            x=geom_center[0],
-            y=geom_center[1],
-            z=geom_center[2])
+        mesh = NjMesh()
 
         vertex_node = VertexListNode(
             flags=0x29,
