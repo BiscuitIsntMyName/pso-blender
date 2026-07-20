@@ -1,4 +1,9 @@
-# pso-blender
+This is a fork of the work made by jtuu. Thanks for your job jtuu <3.
+
+My work is generaly texture oriented so the modifications i could add here will be focused on texture edition more than map creation.
+
+
+# pso-blender (original jtuu readme content below)
 
 A plugin for Blender (v4.2+) that can import and export the following file formats for Phantasy Star Online Blue Burst:
 
