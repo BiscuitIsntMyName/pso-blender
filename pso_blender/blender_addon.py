@@ -14,7 +14,7 @@ from .bml_import_menu import ImportBml
 from .bml_export_menu import ExportBml
 from .xj_import_menu import ImportXj
 from .xj_export_menu import ExportXj
-from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel
+from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel, XjSelectMaterialEverywhere
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 
 
@@ -69,6 +69,7 @@ classes = [
     ExportXj,
     XjMaterialSettings,
     XjMaterialSettingsPanel,
+    XjSelectMaterialEverywhere,
     NjcmNodeSettings,
     NjcmNodeSettingsPanel
 ]

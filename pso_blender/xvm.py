@@ -1,5 +1,5 @@
 from typing import Any, Literal, cast, final
-import os, pathlib, marshal, json, hashlib, warnings, time, sys
+import os, pathlib, marshal, json, hashlib, warnings, time
 from dataclasses import dataclass, field
 import bpy
 import bpy.types
@@ -8,11 +8,7 @@ from .util import magic_bytes, Texture, get_object_diffuse_textures
 from .iff import IffHeader
 
 
-# Workaround for getting multiprocessing to work
-worker_path = os.path.dirname(os.path.abspath(__file__))
-if worker_path not in sys.path:
-    sys.path.insert(0, worker_path)
-import dxt  # pyright: ignore[reportImplicitRelativeImport]
+from . import xvm_dxt  # pyright: ignore[reportImplicitRelativeImport]
 
 
 U8 = Numeric.U8
@@ -273,14 +269,14 @@ def make_xvr(tex: Texture) -> Xvr:
         flags |= XvrFlags.ALPHA
     xvr_format = XvrFormat.DXT1
     pixels = cast(list[float], cast(Any, tex.image).pixels)
-    data = dxt.compress_image(list(pixels), img_width, img_height, tex.image.channels, tex.has_alpha)
+    data = xvm_dxt.compress_image(list(pixels), img_width, img_height, tex.image.channels, tex.has_alpha)
     if tex.generate_mipmaps:
         # Concat mipmaps into data
         mipmaps = generate_mipmaps(tex.image, tex.has_alpha)
         for level in mipmaps:
             pixels = cast(list[float], cast(Any, level).pixels)
             level_width, level_height = level.size
-            data += dxt.compress_image(list(pixels), level_width, level_height, level.channels, tex.has_alpha)
+            data += xvm_dxt.compress_image(list(pixels), level_width, level_height, level.channels, tex.has_alpha)
             # Remove temporary copies because Blender automatically saves them in the scene
             bpy.data.images.remove(level)
     return Xvr(
@@ -340,7 +336,7 @@ def read_rgb565_texture(src_buf: bytearray) -> list[float]:
     dst_chans = 4
     dst_buf = len(src_buf) // 2 * dst_chans * [0.0]
     for i in range(0, len(src_buf), 2):
-        (r, g, b) = dxt.decompose_rgb565(src_buf[i + 1] | src_buf[i + 0])
+        (r, g, b) = xvm_dxt.decompose_rgb565(src_buf[i + 1] | src_buf[i + 0])
         dst_i = i // 2 * dst_chans
         dst_buf[dst_i + 0] = r / 0xff
         dst_buf[dst_i + 1] = g / 0xff
@@ -369,24 +365,38 @@ def read_argb1555_texture(src_buf: bytearray) -> list[float]:
     return dst_buf
 
 
+# Keyed by absolute path -> (mtime, size, decoded Xvm). Importing a multi-chunk map (n.rel for
+# several chunks) re-reads the same shared .xvm file once per chunk; decoding every texture in it
+# each time is wasted work. Invalidated by mtime/size rather than cached forever, since texture
+# pack work means these files get regenerated and re-imported within the same Blender session.
+_read_cache: dict[str, tuple[float, int, "Xvm"]] = {}
+
+
 def read(path: str) -> Xvm:
     try:
-        with open(path, "rb") as f:
-            file_contents = bytearray(f.read())
+        stat = os.stat(path)
     except FileNotFoundError:
         warnings.warn("XVM not found: \"{}\"".format(path))
         return Xvm()
+
+    abs_path = os.path.abspath(path)
+    cached = _read_cache.get(abs_path)
+    if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
+        return cached[2]
+
+    with open(path, "rb") as f:
+        file_contents = bytearray(f.read())
 
     (xvm, xvr_offset) = Xvm.deserialize_from(file_contents)
     for _ in range(xvm.xvr_count):
         (xvr, data_offset) = Xvr.deserialize_from(file_contents, xvr_offset)
         compressed_data = file_contents[data_offset : data_offset + xvr.data_size]
         if xvr.format == XvrFormat.DXT1:
-            pixels = dxt.dxt1_decompress(compressed_data, xvr.width, xvr.height)
+            pixels = xvm_dxt.dxt1_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.DXT2 or xvr.format == XvrFormat.DXT3:
-            pixels = dxt.dxt3_decompress(compressed_data, xvr.width, xvr.height)
+            pixels = xvm_dxt.dxt3_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.DXT4 or xvr.format == XvrFormat.DXT5:
-            pixels = dxt.dxt5_decompress(compressed_data, xvr.width, xvr.height)
+            pixels = xvm_dxt.dxt5_decompress(compressed_data, xvr.width, xvr.height)
         elif xvr.format == XvrFormat.R5G6B5:
             pixels = read_rgb565_texture(compressed_data)
         elif xvr.format == XvrFormat.A1R5G5B5:
@@ -399,4 +409,5 @@ def read(path: str) -> Xvm:
         xvr_offset += xvr.body_size + IffHeader.type_size()
 
     xvm.set_filename(os.path.basename(path))
+    _read_cache[abs_path] = (stat.st_mtime, stat.st_size, xvm)
     return xvm

@@ -174,6 +174,8 @@ class NumericFieldPlan:
     tp: Any
     fmt: str
     value_getter: Callable[[Serializable], Any]
+    # get_origin(tp), precomputed once when the plan is built instead of on every deserialize call
+    type_origin: Any = None
 
 @dataclass
 class MultipleNumericFieldPlan:
@@ -181,6 +183,9 @@ class MultipleNumericFieldPlan:
     tp: list[Any]
     fmt: str
     value_getter: Callable[[Serializable], list[Any]]
+    # get_origin(t) for each t in tp, precomputed once when the plan is built instead of on every
+    # deserialize call
+    type_origins: list[Any] = field(default_factory=list)
 
 @dataclass
 class DynamicNumericFieldPlan:
@@ -358,7 +363,8 @@ class Serializable:
                         numeric_fields_names_accum[0],
                         numeric_fields_types_accum[0],
                         field_fmt,
-                        bound_numeric_field_getter))
+                        bound_numeric_field_getter,
+                        get_origin(numeric_fields_types_accum[0])))
                 else:
                     multiple_numeric_field_getter: Callable[[list[str], Serializable], list[Any]] = \
                         lambda numeric_fields, ser: [ser.__dict__[name] for name in numeric_fields]
@@ -368,7 +374,8 @@ class Serializable:
                         numeric_fields_names_accum,
                         numeric_fields_types_accum,
                         field_fmt,
-                        bound_multiple_numeric_field_getter))
+                        bound_multiple_numeric_field_getter,
+                        [get_origin(t) for t in numeric_fields_types_accum]))
                 numeric_fields_names_accum = []
                 numeric_fields_types_accum = []
                 if is_last and field_is_numeric:
@@ -384,7 +391,8 @@ class Serializable:
                     field_name,
                     field_type,
                     field_fmt,
-                    bound_ptr_field_getter))
+                    bound_ptr_field_getter,
+                    field_type_origin))
             elif field_is_numeric:
                 # Combine consecutive numeric fields
                 numeric_fields_names_accum.append(field_name)
@@ -416,7 +424,8 @@ class Serializable:
                         [field_name] * expected_len,
                         [field_type] * expected_len,
                         field_fmt,
-                        bound_numeric_fixed_array_getter))
+                        bound_numeric_fixed_array_getter,
+                        [field_type_origin] * expected_len))
                 else:
                     raise Exception("FixedArray member '{}' of class '{}' has unserializable element type".format(field_name, root_value.__name__))
             elif field_type_origin is list:
@@ -518,7 +527,7 @@ class Serializable:
         if isinstance(plan, NumericFieldPlan):
             sz = Numeric.size_of_format(plan.fmt)
             (deserialized, ) = unpack_from(plan.fmt, ctx["buf"], ctx["offset"])
-            type_origin = get_origin(plan.tp)
+            type_origin = plan.type_origin
             if type_origin is Ptr32:
                 pointee_type = get_args(plan.tp)[0]
                 ptr = Ptr32[pointee_type](deserialized)
@@ -536,7 +545,7 @@ class Serializable:
             for i in range(count):
                 fmt = Numeric.endianness_prefix + plan.fmt[-count + i]
                 sz = Numeric.size_of_format(fmt)
-                type_origin = get_origin(plan.tp[i])
+                type_origin = plan.type_origins[i]
                 if type_origin is list or plan.tp[i].__name__ == "FixedArray":
                     ctx["result"].__dict__[plan.names[i]].append(values[i])
                 else:

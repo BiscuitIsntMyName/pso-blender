@@ -1,4 +1,4 @@
-import functools, multiprocessing, struct
+import functools, struct
 from typing import cast, TypeAlias
 
 
@@ -9,11 +9,21 @@ def rgb8_to_rgb565(rgb: RGB) -> int:
     return ((rgb[0] & 0xf8) << 8) | ((rgb[1] & 0xfc) << 3) | (rgb[2] >> 3)
 
 
-def decompose_rgb565(rgb: int) -> RGB:
+def _decompose_rgb565_uncached(rgb: int) -> RGB:
     r = rgb >> 11
     g = (rgb >> 5) & 0x3f
     b = rgb & 0x1f
     return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+
+
+# Only 65536 possible rgb565 values exist, and decoding hits this on every DXT block's two
+# endpoint colors - precomputing the table once avoids repeating the same bit-shift arithmetic
+# for the same handful of distinct colors over and over across every block.
+_DECOMPOSE_RGB565_TABLE: tuple[RGB, ...] = tuple(_decompose_rgb565_uncached(rgb) for rgb in range(0x10000))
+
+
+def decompose_rgb565(rgb: int) -> RGB:
+    return _DECOMPOSE_RGB565_TABLE[rgb]
 
 
 def dxt_get_block_bounds(
@@ -136,8 +146,7 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
             block_coords.append((x, y))
     # Start workers
     worker_fn = functools.partial(dxt1_compress_block, pixels, img_width, DXT_BLOCK_DIM, src_channels, with_alpha)
-    with multiprocessing.Pool() as pool:
-        results = pool.map(worker_fn, block_coords)
+    results = list(map(worker_fn, block_coords))
     # Write results into buffer
     for (block_idx, result) in enumerate(results):
         dst_offset = block_idx * DXT1_BLOCK_SZ
@@ -271,11 +280,11 @@ def dxt5_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list
             elif alpha0 > alpha1:
                 # Interpolation method 1
                 alpha_value = (((8 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 7)
+            elif alpha_idx == 6:
+                alpha_value = 0
+            elif alpha_idx == 7:
+                alpha_value = 0xff
             else:
-                if alpha_idx == 6:
-                    alpha_value = 0
-                elif alpha_idx == 7:
-                    alpha_value = 0xff
                 # Interpolation method 2
                 alpha_value = (((6 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 5)
             dst_buf[px_i + 3] = alpha_value / 0xff
