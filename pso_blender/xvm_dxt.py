@@ -1,4 +1,4 @@
-import functools, multiprocessing, struct
+import functools, struct
 from typing import cast, TypeAlias
 
 
@@ -9,11 +9,21 @@ def rgb8_to_rgb565(rgb: RGB) -> int:
     return ((rgb[0] & 0xf8) << 8) | ((rgb[1] & 0xfc) << 3) | (rgb[2] >> 3)
 
 
-def decompose_rgb565(rgb: int) -> RGB:
+def _decompose_rgb565_uncached(rgb: int) -> RGB:
     r = rgb >> 11
     g = (rgb >> 5) & 0x3f
     b = rgb & 0x1f
     return ((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2))
+
+
+# Only 65536 possible rgb565 values exist, and decoding hits this on every DXT block's two
+# endpoint colors - precomputing the table once avoids repeating the same bit-shift arithmetic
+# for the same handful of distinct colors over and over across every block.
+_DECOMPOSE_RGB565_TABLE: tuple[RGB, ...] = tuple(_decompose_rgb565_uncached(rgb) for rgb in range(0x10000))
+
+
+def decompose_rgb565(rgb: int) -> RGB:
+    return _DECOMPOSE_RGB565_TABLE[rgb]
 
 
 def dxt_get_block_bounds(
@@ -136,13 +146,65 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
             block_coords.append((x, y))
     # Start workers
     worker_fn = functools.partial(dxt1_compress_block, pixels, img_width, DXT_BLOCK_DIM, src_channels, with_alpha)
-    with multiprocessing.Pool() as pool:
-        results = pool.map(worker_fn, block_coords)
+    results = list(map(worker_fn, block_coords))
     # Write results into buffer
     for (block_idx, result) in enumerate(results):
         dst_offset = block_idx * DXT1_BLOCK_SZ
         (color0, color1, color_indices) = result
         struct.pack_into("<HHL", dst_buf, dst_offset, color0, color1, color_indices)
+    return dst_buf
+
+
+def dxt3_alpha_block(
+        pixels: list[float],
+        img_width: int, block_dim: int,
+        src_channels: int,
+        coords: tuple[int, int]
+    ) -> int:
+    """Packs a block's 16 alpha values into the 64-bit explicit 4-bit-per-pixel table that
+    dxt3_decompress reads back (alpha_step = 0x11, i.e. nibble * 17 == byte value)."""
+    x, y = coords
+    alpha_table = 0
+    for block_px_i in range(block_dim * block_dim):
+        block_x = block_px_i % block_dim
+        block_y = block_px_i // block_dim
+        src_offset = img_width * ((y + block_y) * src_channels) + ((x + block_x) * src_channels)
+        alpha_float = pixels[src_offset + 3]
+        nibble = max(0, min(15, round(alpha_float * 15)))
+        alpha_table |= nibble << (block_px_i * 4)
+    return alpha_table
+
+
+def dxt3_compress_block(
+        pixels: list[float],
+        img_width: int, block_dim: int,
+        src_channels: int,
+        coords: tuple[int, int]
+    ) -> tuple[int, tuple[int, int, int]]:
+    alpha_table = dxt3_alpha_block(pixels, img_width, block_dim, src_channels, coords)
+    # DXT3's color block is always standard 4-color mode - alpha is stored explicitly above, so
+    # there's no punch-through-alpha color ordering trick to apply here.
+    color_block = dxt1_compress_block(pixels, img_width, block_dim, src_channels, False, coords)
+    return (alpha_table, color_block)
+
+
+def compress_image_dxt3(pixels: list[float], img_width: int, img_height: int, src_channels: int) -> bytearray:
+    if src_channels < 4:
+        raise Exception("XVR error: DXT3 requires an image with an alpha channel")
+    if img_width % DXT_BLOCK_DIM != 0 or img_height % DXT_BLOCK_DIM != 0:
+        raise Exception("XVR error: Image dimensions must be multiples of {}".format(DXT_BLOCK_DIM))
+    dst_buf = bytearray(img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM) * DXT3_BLOCK_SZ)
+    block_coords: list[tuple[int, int]] = []
+    for y in range(0, img_height, DXT_BLOCK_DIM):
+        for x in range(0, img_width, DXT_BLOCK_DIM):
+            block_coords.append((x, y))
+    worker_fn = functools.partial(dxt3_compress_block, pixels, img_width, DXT_BLOCK_DIM, src_channels)
+    results = list(map(worker_fn, block_coords))
+    for (block_idx, result) in enumerate(results):
+        dst_offset = block_idx * DXT3_BLOCK_SZ
+        (alpha_table, (color0, color1, color_indices)) = result
+        struct.pack_into("<Q", dst_buf, dst_offset, alpha_table)
+        struct.pack_into("<HHL", dst_buf, dst_offset + 8, color0, color1, color_indices)
     return dst_buf
 
 
@@ -271,11 +333,11 @@ def dxt5_decompress(src_buf: bytearray, img_width: int, img_height: int) -> list
             elif alpha0 > alpha1:
                 # Interpolation method 1
                 alpha_value = (((8 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 7)
+            elif alpha_idx == 6:
+                alpha_value = 0
+            elif alpha_idx == 7:
+                alpha_value = 0xff
             else:
-                if alpha_idx == 6:
-                    alpha_value = 0
-                elif alpha_idx == 7:
-                    alpha_value = 0xff
                 # Interpolation method 2
                 alpha_value = (((6 - alpha_idx) * alpha0 + (alpha_idx - 1) * alpha1) / 5)
             dst_buf[px_i + 3] = alpha_value / 0xff

@@ -14,7 +14,8 @@ from .bml_import_menu import ImportBml
 from .bml_export_menu import ExportBml
 from .xj_import_menu import ImportXj
 from .xj_export_menu import ExportXj
-from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel
+from .xvm_export_menu import ExportXvm
+from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel, XjSelectMaterialEverywhere
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 
 
@@ -39,6 +40,7 @@ if bpy.app.binary_path:
 rel_import_export_description = "Phantasy Star Online map (.rel)"
 bml_import_export_description = "BML (PSO)"
 xj_import_export_description = "XJ (PSO)"
+xvm_export_description = "XVM texture pack (PSO)"
 
 
 def menu_func_export(self: bpy.types.Menu, _context: bpy.types.Context):
@@ -46,6 +48,7 @@ def menu_func_export(self: bpy.types.Menu, _context: bpy.types.Context):
         _ = self.layout.operator(ExportRel.bl_idname, text=rel_import_export_description)
         _ = self.layout.operator(ExportBml.bl_idname, text=bml_import_export_description)
         _ = self.layout.operator(ExportXj.bl_idname, text=xj_import_export_description)
+        _ = self.layout.operator(ExportXvm.bl_idname, text=xvm_export_description)
 
 
 def menu_func_import(self: bpy.types.Menu, _context: bpy.types.Context):
@@ -67,8 +70,10 @@ classes = [
     ExportBml,
     ImportXj,
     ExportXj,
+    ExportXvm,
     XjMaterialSettings,
     XjMaterialSettingsPanel,
+    XjSelectMaterialEverywhere,
     NjcmNodeSettings,
     NjcmNodeSettingsPanel
 ]

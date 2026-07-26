@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from typing import ClassVar, TypeAlias, TypeGuard, cast, final
 from warnings import warn
-import bpy, os, bmesh, math
+import bpy, os, bmesh, math, hashlib
 from dataclasses import dataclass, field
 
 from bpy.types import Collection, FloatColorAttribute, Material
@@ -696,6 +696,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
     elif normal_type is not None:
         # Effects that need normals usually also need vcol. Let's add a blank white color attribute.
         vertex_colors = cast(FloatColorAttribute, blender_mesh.color_attributes.new("xj_default_vcol", "FLOAT_COLOR", "POINT"))
+        assert vertex_colors is not None
         for attr in vertex_colors.data:
             attr.color[0] = 1
             attr.color[1] = 1
@@ -765,18 +766,101 @@ def make_renderstate_args(
     return rs_args
 
 
+def make_texture_addressing_node(node_tree: bpy.types.ShaderNodeTree, addr_mode: str) -> bpy.types.ShaderNodeMath:
+    """A Math node that maps one UV component into [0, 1] according to a D3D texture addressing mode."""
+    math_node = cast(bpy.types.ShaderNodeMath, node_tree.nodes.new(type="ShaderNodeMath"))
+    if addr_mode in (TextureAddressingMode.D3DTADDRESS_MIRROR.name, TextureAddressingMode.D3DTADDRESS_MIRRORONCE.name):
+        math_node.operation = "PINGPONG"
+        math_node.inputs[1].default_value = 1.0
+    elif addr_mode in (TextureAddressingMode.D3DTADDRESS_CLAMP.name, TextureAddressingMode.D3DTADDRESS_BORDER.name):
+        # No dedicated border color is available, so BORDER is approximated as CLAMP (extend
+        # edge texel) rather than a hard transparent cutoff.
+        math_node.operation = "ADD"
+        math_node.inputs[1].default_value = 0.0
+        math_node.use_clamp = True
+    else:
+        # WRAP (also the fallback default)
+        math_node.operation = "WRAP"
+        math_node.inputs[1].default_value = 0.0
+        math_node.inputs[2].default_value = 1.0
+    return math_node
+
+
 def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None) -> Material:
-    mat = bpy.data.materials.new("{}_node_{}_mat_{}".format(name, node_id, material_id))
+    # First pass: parse settings to find tex_id (needed for material deduplication and naming)
+    tex_id = None
+    for setting in material_settings:
+        if setting.state_type == RenderStateType.TEXTURE_ID:
+            tex_id = setting.arg1
+            break
+
+    # Materials are keyed by texture + full render state (blend mode, texture addressing, etc,
+    # everything except the texture id itself which is represented separately). The same texture
+    # can legitimately appear with different render state in different places on a map (e.g. an
+    # additive-blended glow effect vs a normally-blended surface, or different UV wrap modes), so
+    # collapsing those into one material would silently pick one look and apply it everywhere.
+    # Keying on the full settings signature means identical (texture, render state) pairs still
+    # share one material datablock, while genuinely different variants each get their own.
+    #
+    # "Which material(s) use this texture" is answered separately (see
+    # XjSelectMaterialEverywhere in xj_material_properties_menu.py), by comparing the image
+    # datablock plugged into each material's texture node - not by material identity/name. That's
+    # what lets the user find every occurrence of a texture across the whole map regardless of
+    # which render-state variant it's using in each spot.
+    if tex_id is not None and xj_xvm is not None:
+        settings_signature = sorted(
+            (s.state_type, s.arg1, s.arg2)
+            for s in material_settings
+            if s.state_type != RenderStateType.TEXTURE_ID)
+        settings_hash = hashlib.md5(repr(settings_signature).encode()).hexdigest()[:8]
+        mat_name = "Mat_{}_{}_{}".format(xj_xvm.get_filename(), tex_id, settings_hash)
+    else:
+        mat_name = "{}_node_{}_mat_{}".format(name, node_id, material_id)
+
+    # Check if a material with this exact name already exists (deduplication by name + texture number)
+    existing_mat_idx = bpy.data.materials.find(mat_name)
+    if existing_mat_idx != -1:
+        return bpy.data.materials[existing_mat_idx]
+
+    # Find or create the image from xvr
+    img: bpy.types.Image | None = None
+    if tex_id is not None and xj_xvm is not None:
+        xvr = xj_xvm.xvrs[tex_id]
+        img_name = "{}_xvr_{}".format(xj_xvm.get_filename(), tex_id)
+        img_idx = bpy.data.images.find(img_name)
+        if img_idx == -1:
+            img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
+            assert img is not None
+            # Determine alpha mode
+            has_alpha = xvr.flags & xvm.XvrFlags.ALPHA
+            has_premul_alpha = xvr.format == xvm.XvrFormat.DXT2 or xvr.format == xvm.XvrFormat.DXT4
+            if not has_alpha:
+                img.alpha_mode = "NONE"
+            elif has_premul_alpha:
+                img.alpha_mode = "PREMUL"
+            else:
+                img.alpha_mode = "STRAIGHT"
+        else:
+            img = bpy.data.images[img_idx]
+            assert img is not None
+        if len(xvr.data) > 0:
+            # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
+            img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+
+    # No existing material found, create a new one
+    mat = bpy.data.materials.new(mat_name)
     mat.use_nodes = True
     if mat.node_tree:
         mat.node_tree.links.clear()
         mat.node_tree.nodes.clear()
-    
-    tex_id = None
 
     # Parse xj material settings
     xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
     xj_settings.lighting = False
+    if tex_id is not None and xj_xvm is not None:
+        xj_settings.generate_mipmaps = bool(xvr.flags & xvm.XvrFlags.MIPMAPS)
+        xj_settings.pso_id = xvr.id
+        xj_settings.source_xvm_path = xj_xvm.get_full_path()
     for setting in material_settings:
         t = setting.state_type
         arg1 = setting.arg1
@@ -809,30 +893,6 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
             xj_settings.camera_space_normals = bool(arg1)
         elif t == RenderStateType.MATERIAL_SOURCE:
             xj_settings.diffuse_color_source = MaterialColorSource(arg1).name
-    
-    if tex_id is None or xj_xvm is None:
-        img = None
-    else:
-        # Find old or create new image from xvr
-        xvr = xj_xvm.xvrs[tex_id]
-        img_name = "{}_xvr_{}".format(xj_xvm.get_filename(), tex_id)
-        img_idx = bpy.data.images.find(img_name)
-        if img_idx == -1:
-            img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
-            # Determine alpha mode
-            has_alpha = xvr.flags & xvm.XvrFlags.ALPHA
-            has_premul_alpha = xvr.format == xvm.XvrFormat.DXT2 or xvr.format == xvm.XvrFormat.DXT4
-            if not has_alpha:
-                img.alpha_mode = "NONE"
-            elif has_premul_alpha:
-                img.alpha_mode = "PREMUL"
-            else:
-                img.alpha_mode = "STRAIGHT"
-        else:
-            img = bpy.data.images[img_idx]
-        if len(xvr.data) > 0:
-            # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
-            img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
 
     if mat.node_tree is None:
         raise Exception("XJ error in object '{}': Material has no node tree".format(name))
@@ -853,21 +913,67 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     mix_node.blend_type = "MULTIPLY"
     cast(bpy.types.NodeSocketFloat, mix_node.inputs[0]).default_value = 1.0
 
+    # Texture Coordinate and Mapping nodes for clean UV input chain
+    tex_coord_node = cast(bpy.types.ShaderNodeTexCoord, mat.node_tree.nodes.new(type="ShaderNodeTexCoord"))
+    mapping_node = cast(bpy.types.ShaderNodeMapping, mat.node_tree.nodes.new(type="ShaderNodeMapping"))
+
+    # Blender's image texture node only has a single "Extension" setting shared by both U and V,
+    # but PSO materials frequently use a different addressing mode per axis (e.g. wrap on U,
+    # clamp on V). To honor both independently, U and V are split out and each run through their
+    # own wrap/mirror/clamp math node before being recombined and fed into the texture.
+    separate_uv_node: bpy.types.ShaderNodeSeparateXYZ | None = None
+    combine_uv_node: bpy.types.ShaderNodeCombineXYZ | None = None
+    addr_u_node: bpy.types.ShaderNodeMath | None = None
+    addr_v_node: bpy.types.ShaderNodeMath | None = None
+
     if img is None:
         tex_node = None
     else:
         tex_node = cast(bpy.types.ShaderNodeTexImage, mat.node_tree.nodes.new(type="ShaderNodeTexImage"))
         tex_node.image = img
-        if xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_WRAP:
-            tex_node.extension = "REPEAT"
-        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_MIRROR:
-            tex_node.extension = "MIRROR"
-        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_CLAMP:
-            tex_node.extension = "CLIP"
-        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_BORDER:
-            tex_node.extension = "CLIP"
-        elif xj_settings.tex_addr_u == TextureAddressingMode.D3DTADDRESS_MIRRORONCE:
-            tex_node.extension = "MIRROR"
+        # The math nodes below pre-wrap U/V into [0, 1], so the image node's own extension is
+        # just a safe fallback for floating point edge cases right at the boundary.
+        tex_node.extension = "EXTEND"
+
+        separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
+        combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
+        addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
+        addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
+
+    # Organize nodes horizontally from left to right with ~300px spacing
+    # Texture chain (top row, Y = 300)
+    tex_coord_node.location = (-1500, 300)
+    mapping_node.location = (-1200, 300)
+    if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
+        separate_uv_node.location = (-900, 300)
+        addr_u_node.location = (-600, 400)
+        addr_v_node.location = (-600, 200)
+        combine_uv_node.location = (-300, 300)
+    if tex_node is not None:
+        tex_node.location = (0, 300)
+    # Vertex color chain (bottom row, Y = -100)
+    vcol_node.location = (0, -100)
+    # Mix and alpha modulate (middle column, X = 300)
+    mix_node.location = (300, 100)
+    alpha_modulate_node.location = (300, -200)
+    # BSDF and transparency (X = 600)
+    bsdf_node.location = (600, 100)
+    transparency_node.location = (600, -200)
+    # Shader mix (X = 900)
+    shader_mix_node.location = (900, 0)
+    # Output (X = 1200)
+    output_node.location = (1200, 0)
+
+    # Connect UV -> Mapping -> (per-axis wrap) -> Texture
+    _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], mapping_node.inputs["Vector"])
+    if tex_node is not None and separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
+        _ = mat.node_tree.links.new(mapping_node.outputs["Vector"], separate_uv_node.inputs["Vector"])
+        _ = mat.node_tree.links.new(separate_uv_node.outputs["X"], addr_u_node.inputs[0])
+        _ = mat.node_tree.links.new(separate_uv_node.outputs["Y"], addr_v_node.inputs[0])
+        _ = mat.node_tree.links.new(addr_u_node.outputs[0], combine_uv_node.inputs["X"])
+        _ = mat.node_tree.links.new(addr_v_node.outputs[0], combine_uv_node.inputs["Y"])
+        _ = mat.node_tree.links.new(separate_uv_node.outputs["Z"], combine_uv_node.inputs["Z"])
+        _ = mat.node_tree.links.new(combine_uv_node.outputs["Vector"], tex_node.inputs["Vector"])
 
     _ = mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
     _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])

@@ -1,5 +1,4 @@
 import sys
-from multiprocessing import current_process
 
 
 bl_info = {
@@ -9,8 +8,7 @@ bl_info = {
 }
 
 
-# Trying to work around weird issue with multiprocessing on Windows
-if current_process().name == "MainProcess" and "unittest" not in sys.modules.keys():
+if "unittest" not in sys.modules.keys():
     from .blender_addon import register, unregister  # pyright: ignore[reportUnusedImport]
 
     if __name__ == "__main__":
