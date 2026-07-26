@@ -3,9 +3,11 @@ import os, pathlib, marshal, json, hashlib, warnings, time
 from dataclasses import dataclass, field
 import bpy
 import bpy.types
+from mathutils import Vector, Matrix, Euler
 from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
 from .util import magic_bytes, Texture, get_object_diffuse_textures
 from .iff import IffHeader
+from .xj_material_properties_menu import MaterialWithXjSettings
 
 
 from . import xvm_dxt  # pyright: ignore[reportImplicitRelativeImport]
@@ -275,6 +277,76 @@ def generate_mip_levels(pixels: list[float], width: int, height: int, channels: 
     return levels
 
 
+_MAPPING_IDENTITY_LOCATION = (0.0, 0.0, 0.0)
+_MAPPING_IDENTITY_ROTATION = (0.0, 0.0, 0.0)
+_MAPPING_IDENTITY_SCALE = (1.0, 1.0, 1.0)
+
+
+def get_material_mapping_transform(mat: bpy.types.Material) -> Matrix | None:
+    """The transform of a material's Mapping node (Location/Rotation/Scale), or None if there's
+    no Mapping node or it's still at its default identity values (nothing to bake).
+
+    The actual PSO file format has no concept of a UV transform - the game just samples the
+    texture with the mesh's raw UV. So a Mapping node someone dials in by hand in Blender (to
+    preview a different tiling/offset/rotation) only affects the Blender viewport unless its
+    effect is baked into the exported texture's pixels themselves.
+    """
+    if mat.node_tree is None:
+        return None
+    mapping_node = next((n for n in mat.node_tree.nodes if n.type == "MAPPING"), None)
+    if mapping_node is None:
+        return None
+    location = cast(Any, mapping_node.inputs["Location"]).default_value
+    rotation = cast(Any, mapping_node.inputs["Rotation"]).default_value
+    scale = cast(Any, mapping_node.inputs["Scale"]).default_value
+    if (tuple(location) == _MAPPING_IDENTITY_LOCATION
+            and tuple(rotation) == _MAPPING_IDENTITY_ROTATION
+            and tuple(scale) == _MAPPING_IDENTITY_SCALE):
+        return None
+    # Matches the "Point" mapping type's own semantics (the default, and the only type this
+    # importer ever creates): scale first, then rotate, then translate.
+    return Matrix.LocRotScale(Vector(location), Euler(rotation, "XYZ"), Vector(scale))
+
+
+def _fold_uv_coordinate(s: float, addr_mode: str) -> float:
+    """Folds an arbitrary UV coordinate into [0, 1) the same way the live node graph's per-axis
+    Wrap/Ping-Pong/Clamp math node would (see make_texture_addressing_node in xj.py)."""
+    if addr_mode in ("D3DTADDRESS_MIRROR", "D3DTADDRESS_MIRRORONCE"):
+        t = s % 2.0
+        return t if t < 1.0 else 2.0 - t
+    elif addr_mode in ("D3DTADDRESS_CLAMP", "D3DTADDRESS_BORDER"):
+        return min(1.0, max(0.0, s))
+    else:
+        return s % 1.0
+
+
+def bake_material_mapping(mat: bpy.types.Material, pixels: list[float], width: int, height: int, channels: int) -> list[float]:
+    """Resamples pixels (nearest-neighbor) so sampling the result with the mesh's raw UV
+    reproduces what the material's Mapping node currently shows in Blender. No-op (returns
+    pixels unchanged) if the material has no Mapping node or it's at its default identity."""
+    transform = get_material_mapping_transform(mat)
+    if transform is None:
+        return pixels
+    settings = cast(MaterialWithXjSettings, mat).xj_settings
+    addr_u = settings.tex_addr_u
+    addr_v = settings.tex_addr_v
+    result = [0.0] * (width * height * channels)
+    for y in range(height):
+        v = (y + 0.5) / height
+        for x in range(width):
+            u = (x + 0.5) / width
+            sample = transform @ Vector((u, v, 0.0))
+            su = _fold_uv_coordinate(sample.x, addr_u)
+            sv = _fold_uv_coordinate(sample.y, addr_v)
+            src_x = min(width - 1, int(su * width))
+            src_y = min(height - 1, int(sv * height))
+            src_i = (src_y * width + src_x) * channels
+            dst_i = (y * width + x) * channels
+            for c in range(channels):
+                result[dst_i + c] = pixels[src_i + c]
+    return result
+
+
 def make_xvr(tex: Texture) -> Xvr:
     img_width, img_height = tex.image.size
     flags = 0
@@ -299,6 +371,9 @@ def make_xvr(tex: Texture) -> Xvr:
         return xvm_dxt.compress_image(px, w, h, channels, tex.has_alpha)
 
     pixels = cast(list[float], cast(Any, tex.image).pixels)
+    mat = bpy.data.materials.get(tex.material_name)
+    if mat is not None:
+        pixels = bake_material_mapping(mat, list(pixels), img_width, img_height, tex.image.channels)
     data = compress(list(pixels), img_width, img_height, tex.image.channels)
     if tex.generate_mipmaps:
         # Real game .xvm files store an actual compressed mip pyramid immediately after the base
