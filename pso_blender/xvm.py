@@ -58,6 +58,14 @@ class XvrFormat:
     X8R8G8B8 = 19
 
 
+# Empirically measured (not a documented part of the format): the fixed size of the all-zero
+# trailer real game .xvm files append after a texture's data when its MIPMAPS flag is set.
+MIPMAP_TAIL_SIZE_BY_FORMAT = {
+    XvrFormat.DXT1: 22,
+    XvrFormat.DXT2: 43,
+}
+
+
 @final
 class XvrFlags:
     MIPMAPS = 1
@@ -107,12 +115,19 @@ class Xvm(Serializable):
     unk13: U32 = 0
     xvrs: list[Xvr] = field(default_factory=list)
     _filename: str = ""
+    _full_path: str = ""
 
     def set_filename(self, filename: str):
         self._filename = filename
-    
+
     def get_filename(self) -> str:
         return self._filename
+
+    def set_full_path(self, path: str):
+        self._full_path = path
+
+    def get_full_path(self) -> str:
+        return self._full_path
 
 class TextureManager:
     _base_id: int
@@ -190,39 +205,6 @@ class TextureManager:
         return None
 
 
-def generate_mipmaps(image: bpy.types.Image, has_alpha: bool) -> list[bpy.types.Image]:
-    mip_dim, _ = image.size
-    levels: list[bpy.types.Image] = []
-    level_idx = 0
-    alpha_test = 0.75 # Value used by the game
-    pixels = cast(list[float], cast(Any, image).pixels)
-
-    alpha_test_count = 0
-    if has_alpha:
-        for px_idx in range(0, len(pixels), 4):
-            alpha = pixels[px_idx + 3]
-            if alpha > alpha_test:
-                alpha_test_count += 1
-    orig_coverage = alpha_test_count / (mip_dim * mip_dim)
-
-    while True:
-        level_idx += 1
-        mip_dim = mip_dim // 2
-        if mip_dim <= 2:
-            break
-        level = image.copy()
-        pixels = cast(list[float], cast(Any, level).pixels)
-        level.scale(mip_dim, mip_dim)
-        if has_alpha:
-            alpha_threshold = orig_coverage * alpha_test * mip_dim
-            for px_idx in range(0, len(pixels), 4):
-                alpha = pixels[px_idx + 3]
-                if alpha > alpha_threshold:
-                    pixels[px_idx + 3] = 1.0
-        levels.append(level)
-    return levels
-
-
 def texture_checksum(tex: Texture) -> str:
     data = list(cast(Any, tex.image).pixels)
     data.append(float(tex.generate_mipmaps))
@@ -258,27 +240,83 @@ def cache_xvr(path: str, xvr: Xvr):
         _ = f.write(buf.buffer)
 
 
+MIP_MIN_DIM = 4
+
+
+def downsample_pixels_2x(pixels: list[float], width: int, height: int, channels: int) -> tuple[list[float], int, int]:
+    """2x2 box filter, halving both dimensions. Operates on plain pixel lists rather than
+    Blender Image datablocks - Image.copy() + Image.scale() was tried first but produced blank
+    (all-black) results, at least in a --background context."""
+    new_width, new_height = width // 2, height // 2
+    result = [0.0] * (new_width * new_height * channels)
+    for y in range(new_height):
+        src_y = y * 2
+        for x in range(new_width):
+            src_x = x * 2
+            dst_i = (y * new_width + x) * channels
+            for c in range(channels):
+                total = 0.0
+                for dy in range(2):
+                    row_i = (src_y + dy) * width
+                    for dx in range(2):
+                        total += pixels[(row_i + src_x + dx) * channels + c]
+                result[dst_i + c] = total / 4.0
+    return result, new_width, new_height
+
+
+def generate_mip_levels(pixels: list[float], width: int, height: int, channels: int) -> list[tuple[list[float], int, int]]:
+    """Box-filtered mip pyramid, stopping once a level reaches 4x4 (the smallest a DXT block can
+    encode)."""
+    levels: list[tuple[list[float], int, int]] = []
+    cur_pixels, w, h = pixels, width, height
+    while w > MIP_MIN_DIM and h > MIP_MIN_DIM:
+        cur_pixels, w, h = downsample_pixels_2x(cur_pixels, w, h, channels)
+        levels.append((cur_pixels, w, h))
+    return levels
+
+
 def make_xvr(tex: Texture) -> Xvr:
     img_width, img_height = tex.image.size
     flags = 0
     if tex.generate_mipmaps:
         flags |= XvrFlags.MIPMAPS
+    is_premultiplied = False
     if tex.has_alpha:
-        if tex.image.alpha_mode != "STRAIGHT":
+        if tex.image.alpha_mode == "PREMUL":
+            is_premultiplied = True
+        elif tex.image.alpha_mode != "STRAIGHT":
             raise Exception("XVR Error in Image '{}': Image has unsupported alpha mode '{}'".format(tex.image.filepath, tex.image.alpha_mode))
         flags |= XvrFlags.ALPHA
-    xvr_format = XvrFormat.DXT1
+    # DXT1's alpha is 1-bit (transparent or opaque) via a punch-through color-ordering trick.
+    # A PREMUL-alpha source (imported from DXT2/DXT4) has smooth alpha and pixels already
+    # multiplied by alpha, matching DXT2's explicit 4-bit-per-pixel alpha block - use that
+    # instead of collapsing it down to DXT1's binary alpha.
+    xvr_format = XvrFormat.DXT2 if is_premultiplied else XvrFormat.DXT1
+
+    def compress(px: list[float], w: int, h: int, channels: int) -> bytearray:
+        if is_premultiplied:
+            return xvm_dxt.compress_image_dxt3(px, w, h, channels)
+        return xvm_dxt.compress_image(px, w, h, channels, tex.has_alpha)
+
     pixels = cast(list[float], cast(Any, tex.image).pixels)
-    data = xvm_dxt.compress_image(list(pixels), img_width, img_height, tex.image.channels, tex.has_alpha)
+    data = compress(list(pixels), img_width, img_height, tex.image.channels)
     if tex.generate_mipmaps:
-        # Concat mipmaps into data
-        mipmaps = generate_mipmaps(tex.image, tex.has_alpha)
-        for level in mipmaps:
-            pixels = cast(list[float], cast(Any, level).pixels)
-            level_width, level_height = level.size
-            data += xvm_dxt.compress_image(list(pixels), level_width, level_height, level.channels, tex.has_alpha)
-            # Remove temporary copies because Blender automatically saves them in the scene
-            bpy.data.images.remove(level)
+        # Real game .xvm files store an actual compressed mip pyramid immediately after the base
+        # level's data (verified by decoding the real bytes: a standard halve-until-4x4 chain
+        # decodes correctly with no gap between levels). A fixed 2-byte pad follows the last
+        # (4x4) level - confirmed by byte-counting real files, content doesn't appear to matter.
+        # This whole region lives inside data_size, unlike the separate fixed all-zero trailer
+        # below (which sits outside data_size, only inside body_size).
+        for (level_pixels, level_width, level_height) in generate_mip_levels(list(pixels), img_width, img_height, tex.image.channels):
+            data += compress(level_pixels, level_width, level_height, tex.image.channels)
+        data += bytes(2)
+    data_size = len(data)
+    if tex.generate_mipmaps:
+        # Fixed all-zero trailer after the base level + mip chain (verified against ~1100 real
+        # textures across 40 of Ephinea's own map .xvm files: always exactly 22 bytes for DXT1,
+        # 43 bytes for DXT2, regardless of the texture's dimensions or mip chain length).
+        tail_size = MIPMAP_TAIL_SIZE_BY_FORMAT.get(xvr_format, 22)
+        data += bytes(tail_size)
     return Xvr(
         body_size=len(data) + Xvr.type_size() - IffHeader.type_size(),
         id=tex.id,
@@ -286,8 +324,28 @@ def make_xvr(tex: Texture) -> Xvr:
         format=xvr_format,
         width=img_width,
         height=img_height,
-        data_size=len(data),
+        data_size=data_size,
         data=data)  # pyright: ignore[reportArgumentType]
+
+
+def write_xvrs(path: str, xvrs: list[Xvr]):
+    """Serializes already-built Xvr chunks (e.g. from make_xvr(), or passed through unchanged
+    from a source file) into a complete .xvm file."""
+    buf = ResizableBuffer(size=0)
+    # I'll just explicitly write the lists because it's easier
+    xvm = Xvm(
+        body_size=Xvm.type_size() - IffHeader.type_size(),
+        xvr_count=len(xvrs))
+    _ = xvm.serialize_into(buf)
+    for xvr in xvrs:
+        data = xvr.data
+        xvr.data = []
+        _ = xvr.serialize_into(buf)
+        _ = buf.append(bytearray(data))
+        buf.seek_to_end()
+        xvr.data = data  # pyright: ignore[reportAttributeAccessIssue]
+    with open(path, "wb") as f:
+        _ = f.write(buf.buffer)
 
 
 def write(path: str, textures: list[Texture]):
@@ -316,20 +374,7 @@ def write(path: str, textures: list[Texture]):
         cache_index[xvr_basename] = checksum
         save_cache_index(cache_index_path, cache_index)
         xvrs.append(xvr)
-    buf = ResizableBuffer(size=0)
-    # I'll just explicitly write the lists because it's easier
-    xvm = Xvm(
-        body_size=Xvm.type_size() - IffHeader.type_size(),
-        xvr_count=len(xvrs))
-    _ = xvm.serialize_into(buf)
-    for xvr in xvrs:
-        data = xvr.data
-        xvr.data = []
-        _ = xvr.serialize_into(buf)
-        _ = buf.append(bytearray(data))
-        buf.seek_to_end()
-    with open(path, "wb") as f:
-        _ = f.write(buf.buffer)
+    write_xvrs(path, xvrs)
 
 
 def read_rgb565_texture(src_buf: bytearray) -> list[float]:
@@ -409,5 +454,29 @@ def read(path: str) -> Xvm:
         xvr_offset += xvr.body_size + IffHeader.type_size()
 
     xvm.set_filename(os.path.basename(path))
+    xvm.set_full_path(abs_path)
     _read_cache[abs_path] = (stat.st_mtime, stat.st_size, xvm)
+    return xvm
+
+
+def read_raw(path: str) -> Xvm:
+    """Like read(), but Xvr.data is left as the exact original compressed bytes (the full
+    per-texture payload: base level + mip chain + trailer, if present) instead of being decoded
+    to pixels. Used to carry a texture through a standalone XVM export completely unchanged -
+    there's no need to decode+recompress a texture nothing touched, and doing so would lose
+    fidelity (or fail entirely) for formats this addon can't re-encode, like the raw R5G6B5/
+    A1R5G5B5 textures real map .xvm files sometimes contain alongside the DXT-compressed ones."""
+    with open(path, "rb") as f:
+        file_contents = bytearray(f.read())
+
+    (xvm, xvr_offset) = Xvm.deserialize_from(file_contents)
+    header_remainder_size = Xvr.type_size() - IffHeader.type_size()
+    for _ in range(xvm.xvr_count):
+        (xvr, data_offset) = Xvr.deserialize_from(file_contents, xvr_offset)
+        payload_size = xvr.body_size - header_remainder_size
+        xvr.data = file_contents[data_offset : data_offset + payload_size]  # pyright: ignore[reportAttributeAccessIssue]
+        xvm.xvrs.append(xvr)
+        xvr_offset += xvr.body_size + IffHeader.type_size()
+
+    xvm.set_filename(os.path.basename(path))
     return xvm

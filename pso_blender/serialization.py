@@ -546,7 +546,14 @@ class Serializable:
                 fmt = Numeric.endianness_prefix + plan.fmt[-count + i]
                 sz = Numeric.size_of_format(fmt)
                 type_origin = plan.type_origins[i]
-                if type_origin is list or plan.tp[i].__name__ == "FixedArray":
+                if type_origin is list:
+                    ctx["result"].__dict__[plan.names[i]].append(values[i])
+                elif plan.tp[i].__name__ == "FixedArray":
+                    # The default-constructed instance's field already holds its default value
+                    # (e.g. Xvr.magic's default_factory) - reset it on the first element instead
+                    # of appending onto it, or it ends up with default+deserialized values both.
+                    if i == 0:
+                        ctx["result"].__dict__[plan.names[i]] = []
                     ctx["result"].__dict__[plan.names[i]].append(values[i])
                 else:
                     ctx["result"].__dict__[plan.names[i]] = values[i]

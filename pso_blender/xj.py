@@ -857,6 +857,10 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     # Parse xj material settings
     xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
     xj_settings.lighting = False
+    if tex_id is not None and xj_xvm is not None:
+        xj_settings.generate_mipmaps = bool(xvr.flags & xvm.XvrFlags.MIPMAPS)
+        xj_settings.pso_id = xvr.id
+        xj_settings.source_xvm_path = xj_xvm.get_full_path()
     for setting in material_settings:
         t = setting.state_type
         arg1 = setting.arg1

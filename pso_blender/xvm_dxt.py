@@ -155,6 +155,59 @@ def compress_image(pixels: list[float], img_width: int, img_height: int, src_cha
     return dst_buf
 
 
+def dxt3_alpha_block(
+        pixels: list[float],
+        img_width: int, block_dim: int,
+        src_channels: int,
+        coords: tuple[int, int]
+    ) -> int:
+    """Packs a block's 16 alpha values into the 64-bit explicit 4-bit-per-pixel table that
+    dxt3_decompress reads back (alpha_step = 0x11, i.e. nibble * 17 == byte value)."""
+    x, y = coords
+    alpha_table = 0
+    for block_px_i in range(block_dim * block_dim):
+        block_x = block_px_i % block_dim
+        block_y = block_px_i // block_dim
+        src_offset = img_width * ((y + block_y) * src_channels) + ((x + block_x) * src_channels)
+        alpha_float = pixels[src_offset + 3]
+        nibble = max(0, min(15, round(alpha_float * 15)))
+        alpha_table |= nibble << (block_px_i * 4)
+    return alpha_table
+
+
+def dxt3_compress_block(
+        pixels: list[float],
+        img_width: int, block_dim: int,
+        src_channels: int,
+        coords: tuple[int, int]
+    ) -> tuple[int, tuple[int, int, int]]:
+    alpha_table = dxt3_alpha_block(pixels, img_width, block_dim, src_channels, coords)
+    # DXT3's color block is always standard 4-color mode - alpha is stored explicitly above, so
+    # there's no punch-through-alpha color ordering trick to apply here.
+    color_block = dxt1_compress_block(pixels, img_width, block_dim, src_channels, False, coords)
+    return (alpha_table, color_block)
+
+
+def compress_image_dxt3(pixels: list[float], img_width: int, img_height: int, src_channels: int) -> bytearray:
+    if src_channels < 4:
+        raise Exception("XVR error: DXT3 requires an image with an alpha channel")
+    if img_width % DXT_BLOCK_DIM != 0 or img_height % DXT_BLOCK_DIM != 0:
+        raise Exception("XVR error: Image dimensions must be multiples of {}".format(DXT_BLOCK_DIM))
+    dst_buf = bytearray(img_width * img_height // (DXT_BLOCK_DIM * DXT_BLOCK_DIM) * DXT3_BLOCK_SZ)
+    block_coords: list[tuple[int, int]] = []
+    for y in range(0, img_height, DXT_BLOCK_DIM):
+        for x in range(0, img_width, DXT_BLOCK_DIM):
+            block_coords.append((x, y))
+    worker_fn = functools.partial(dxt3_compress_block, pixels, img_width, DXT_BLOCK_DIM, src_channels)
+    results = list(map(worker_fn, block_coords))
+    for (block_idx, result) in enumerate(results):
+        dst_offset = block_idx * DXT3_BLOCK_SZ
+        (alpha_table, (color0, color1, color_indices)) = result
+        struct.pack_into("<Q", dst_buf, dst_offset, alpha_table)
+        struct.pack_into("<HHL", dst_buf, dst_offset + 8, color0, color1, color_indices)
+    return dst_buf
+
+
 def decode_dxt_colors(src_buf: bytearray, src_offset: int, block_idx: int, img_width: int, _img_height: int, dst_buf: list[float], dst_chans: int, is_dxt1: bool):
     palette_ratios_no_alpha = [1.0, 0.0, 2.0 / 3.0, 1.0 / 3.0]
     palette_ratios_with_alpha = [1.0, 0.0, 0.5]

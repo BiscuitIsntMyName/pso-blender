@@ -2,7 +2,7 @@ from enum import Enum
 from typing import cast, final
 import bpy
 import bmesh
-from bpy.props import BoolProperty, EnumProperty, IntProperty  # pyright: ignore[reportUnknownVariableType]
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context
 
 
@@ -109,6 +109,17 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         name="Diffuse color source",
         default=str(MaterialColorSource.D3DMCS_COLOR1.name),
         items=MaterialColorSource_items)
+    # The Xvr.id this material's texture had in the .xvm it was imported from. -1 means unknown
+    # (material wasn't created by this addon's importer) - real PSO ids are never 0 or negative,
+    # so -1 is a safe "not set" sentinel. A standalone XVM export needs this to write textures
+    # back under the same id the existing, untouched .rel/.xj files expect them under.
+    pso_id: IntProperty(name="PSO Texture ID", default=-1)
+    # Full path to the .xvm this material's texture was imported from. Lets a standalone XVM
+    # export find the original file on its own (to carry through textures the user hasn't
+    # touched) without asking the user to re-locate it - Blender can't open a file browser
+    # inside another file browser anyway, so there's no good way to ask for it interactively at
+    # export time.
+    source_xvm_path: StringProperty(name="Source XVM Path", subtype="FILE_PATH", default="")
 
 
 class MaterialWithXjSettings(bpy.types.Material):
@@ -246,3 +257,5 @@ class XjMaterialSettingsPanel(bpy.types.Panel):
             self.layout.prop(settings, "diffuse_color_source")
             self.layout.prop(settings, "material1")
             self.layout.prop(settings, "material2")
+            self.layout.prop(settings, "pso_id")
+            self.layout.prop(settings, "source_xvm_path")
