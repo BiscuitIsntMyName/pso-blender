@@ -786,6 +786,77 @@ def make_texture_addressing_node(node_tree: bpy.types.ShaderNodeTree, addr_mode:
     return math_node
 
 
+def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.types.Image) -> bpy.types.ShaderNodeTree:
+    """A tiny node group wrapping just this texture's Image Texture node, shared by every
+    material variant of this texture (different blend mode / addressing settings, see
+    make_material) so that swapping which image represents this texture - the whole point of a
+    texture pack - only has to be done once, in one shared place, instead of on every variant
+    material separately.
+
+    Deliberately does NOT include the UV addressing chain (Mapping / per-axis wrap math nodes) -
+    that varies legitimately per variant (e.g. CLAMP addressing on one placement of a texture,
+    WRAP on another), so it stays inline in each material rather than being shared here.
+    """
+    group_name = "ImgGroup_{}_{}".format(xvm_filename, tex_id)
+    existing = bpy.data.node_groups.get(group_name)
+    if existing is not None:
+        return cast(bpy.types.ShaderNodeTree, existing)
+
+    group = cast(bpy.types.ShaderNodeTree, bpy.data.node_groups.new(group_name, "ShaderNodeTree"))
+    group.interface.new_socket(name="Vector", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Color", in_out="OUTPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Alpha", in_out="OUTPUT", socket_type="NodeSocketFloat")
+
+    group_input = group.nodes.new(type="NodeGroupInput")
+    group_output = group.nodes.new(type="NodeGroupOutput")
+    tex_image_node = cast(bpy.types.ShaderNodeTexImage, group.nodes.new(type="ShaderNodeTexImage"))
+    tex_image_node.image = img
+    # The addressing math nodes upstream (per material) pre-wrap U/V into [0, 1], so this is just
+    # a safe fallback for floating point edge cases right at the boundary.
+    tex_image_node.extension = "EXTEND"
+
+    group_input.location = (-300, 0)
+    tex_image_node.location = (0, 0)
+    group_output.location = (300, 0)
+
+    _ = group.links.new(group_input.outputs["Vector"], tex_image_node.inputs["Vector"])
+    _ = group.links.new(tex_image_node.outputs["Color"], group_output.inputs["Color"])
+    _ = group.links.new(tex_image_node.outputs["Alpha"], group_output.inputs["Alpha"])
+    return group
+
+
+def get_or_create_mapping_node_group(xvm_filename: str, tex_id: int) -> bpy.types.ShaderNodeTree:
+    """A tiny node group wrapping just this texture's Mapping node, shared by every material
+    variant of this texture (see get_or_create_texture_node_group) so there's exactly one
+    Location/Rotation/Scale transform per original texture - matching that there's exactly one
+    physical texture to bake it into at export (see bake_material_mapping in xvm.py). Without
+    this, each variant would have its own independent Mapping node and editing only one of them
+    (the normal case - a user has no reason to know a texture has several variants) would be
+    ambiguous or silently ignored at export time. Edit the Mapping by entering this group (same
+    workflow as swapping the shared Image).
+    """
+    group_name = "MappingGroup_{}_{}".format(xvm_filename, tex_id)
+    existing = bpy.data.node_groups.get(group_name)
+    if existing is not None:
+        return cast(bpy.types.ShaderNodeTree, existing)
+
+    group = cast(bpy.types.ShaderNodeTree, bpy.data.node_groups.new(group_name, "ShaderNodeTree"))
+    group.interface.new_socket(name="Vector", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Vector", in_out="OUTPUT", socket_type="NodeSocketVector")
+
+    group_input = group.nodes.new(type="NodeGroupInput")
+    group_output = group.nodes.new(type="NodeGroupOutput")
+    mapping_node = cast(bpy.types.ShaderNodeMapping, group.nodes.new(type="ShaderNodeMapping"))
+
+    group_input.location = (-300, 0)
+    mapping_node.location = (0, 0)
+    group_output.location = (300, 0)
+
+    _ = group.links.new(group_input.outputs["Vector"], mapping_node.inputs["Vector"])
+    _ = group.links.new(mapping_node.outputs["Vector"], group_output.inputs["Vector"])
+    return group
+
+
 def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None) -> Material:
     # First pass: parse settings to find tex_id (needed for material deduplication and naming)
     tex_id = None
@@ -913,9 +984,14 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     mix_node.blend_type = "MULTIPLY"
     cast(bpy.types.NodeSocketFloat, mix_node.inputs[0]).default_value = 1.0
 
-    # Texture Coordinate and Mapping nodes for clean UV input chain
+    # Texture Coordinate and Mapping nodes for clean UV input chain. mapping_node ends up being
+    # either a plain ShaderNodeMapping (no texture - see img is None below, nothing to key a
+    # shared group on) or a ShaderNodeGroup wrapping one shared Mapping node per texture (see
+    # get_or_create_mapping_node_group) - both expose "Vector" input/output sockets, which is all
+    # the wiring below ever needs, so the rest of this function doesn't need to care which one it
+    # got.
     tex_coord_node = cast(bpy.types.ShaderNodeTexCoord, mat.node_tree.nodes.new(type="ShaderNodeTexCoord"))
-    mapping_node = cast(bpy.types.ShaderNodeMapping, mat.node_tree.nodes.new(type="ShaderNodeMapping"))
+    mapping_node: bpy.types.ShaderNodeMapping | bpy.types.ShaderNodeGroup
 
     # Blender's image texture node only has a single "Extension" setting shared by both U and V,
     # but PSO materials frequently use a different addressing mode per axis (e.g. wrap on U,
@@ -926,46 +1002,90 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     addr_u_node: bpy.types.ShaderNodeMath | None = None
     addr_v_node: bpy.types.ShaderNodeMath | None = None
 
+    # A second, identical addressing chain placed BEFORE the Mapping node, folding the mesh's
+    # raw UV into a single [0, 1) tile before any Mapping deformation is applied. This mirrors
+    # what the game itself does (it has no Mapping node - it just repeats one texture tile
+    # identically forever) and what xvm.py's export-time bake_material_mapping() already assumes
+    # (it only ever evaluates the transform over a single tile). Without this, editing the
+    # Mapping node here would preview a smooth deformation that slides differently on every
+    # repeat of a tiled surface - a look no exported texture could ever reproduce in-game, since
+    # the game always repeats the exact same texture unchanged. With it, what's previewed here
+    # matches what a texture-only export is actually capable of producing.
+    pre_separate_uv_node: bpy.types.ShaderNodeSeparateXYZ | None = None
+    pre_combine_uv_node: bpy.types.ShaderNodeCombineXYZ | None = None
+    pre_addr_u_node: bpy.types.ShaderNodeMath | None = None
+    pre_addr_v_node: bpy.types.ShaderNodeMath | None = None
+
     if img is None:
         tex_node = None
+        mapping_node = cast(bpy.types.ShaderNodeMapping, mat.node_tree.nodes.new(type="ShaderNodeMapping"))
     else:
-        tex_node = cast(bpy.types.ShaderNodeTexImage, mat.node_tree.nodes.new(type="ShaderNodeTexImage"))
-        tex_node.image = img
-        # The math nodes below pre-wrap U/V into [0, 1], so the image node's own extension is
-        # just a safe fallback for floating point edge cases right at the boundary.
-        tex_node.extension = "EXTEND"
+        # A Group node referencing a texture-specific shared node group (see
+        # get_or_create_texture_node_group), instead of a plain Image Texture node inline here -
+        # every material variant of this same texture shares the same group, so there's only
+        # ever one place to swap the image when replacing a texture.
+        assert tex_id is not None and xj_xvm is not None
+        tex_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
+        tex_node.node_tree = get_or_create_texture_node_group(xj_xvm.get_filename(), tex_id, img)
+
+        mapping_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
+        mapping_node.node_tree = get_or_create_mapping_node_group(xj_xvm.get_filename(), tex_id)
 
         separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
         combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
         addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
         addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
 
+        pre_separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
+        pre_combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
+        pre_addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
+        pre_addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
+
     # Organize nodes horizontally from left to right with ~300px spacing
     # Texture chain (top row, Y = 300)
     tex_coord_node.location = (-1500, 300)
-    mapping_node.location = (-1200, 300)
-    if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
-        separate_uv_node.location = (-900, 300)
-        addr_u_node.location = (-600, 400)
-        addr_v_node.location = (-600, 200)
-        combine_uv_node.location = (-300, 300)
+    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
+        pre_separate_uv_node.location = (-1200, 300)
+        pre_addr_u_node.location = (-900, 400)
+        pre_addr_v_node.location = (-900, 200)
+        pre_combine_uv_node.location = (-600, 300)
+    # The Mapping group and the Image group are the two nodes someone actually needs to Tab into
+    # to edit a texture (transform or swap the image) - placed right next to each other so both
+    # are one click away, with the per-variant post-fold addressing chain (not something you'd
+    # normally need to open) tucked underneath instead of visually sitting between them.
+    mapping_node.location = (-300, 300)
     if tex_node is not None:
         tex_node.location = (0, 300)
+    if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
+        separate_uv_node.location = (-300, 0)
+        addr_u_node.location = (-150, 100)
+        addr_v_node.location = (-150, -100)
+        combine_uv_node.location = (0, 0)
     # Vertex color chain (bottom row, Y = -100)
-    vcol_node.location = (0, -100)
-    # Mix and alpha modulate (middle column, X = 300)
-    mix_node.location = (300, 100)
-    alpha_modulate_node.location = (300, -200)
-    # BSDF and transparency (X = 600)
-    bsdf_node.location = (600, 100)
-    transparency_node.location = (600, -200)
-    # Shader mix (X = 900)
-    shader_mix_node.location = (900, 0)
-    # Output (X = 1200)
-    output_node.location = (1200, 0)
+    vcol_node.location = (900, -100)
+    # Mix and alpha modulate (middle column, X = 1200)
+    mix_node.location = (1200, 100)
+    alpha_modulate_node.location = (1200, -200)
+    # BSDF and transparency (X = 1500)
+    bsdf_node.location = (1500, 100)
+    transparency_node.location = (1500, -200)
+    # Shader mix (X = 1800)
+    shader_mix_node.location = (1800, 0)
+    # Output (X = 2100)
+    output_node.location = (2100, 0)
 
-    # Connect UV -> Mapping -> (per-axis wrap) -> Texture
-    _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], mapping_node.inputs["Vector"])
+    # Connect UV -> (per-axis wrap, native repeat) -> Mapping -> (per-axis wrap again, in case
+    # Mapping pushed the already-folded coordinate back out of [0, 1)) -> Texture
+    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
+        _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], pre_separate_uv_node.inputs["Vector"])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["X"], pre_addr_u_node.inputs[0])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["Y"], pre_addr_v_node.inputs[0])
+        _ = mat.node_tree.links.new(pre_addr_u_node.outputs[0], pre_combine_uv_node.inputs["X"])
+        _ = mat.node_tree.links.new(pre_addr_v_node.outputs[0], pre_combine_uv_node.inputs["Y"])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["Z"], pre_combine_uv_node.inputs["Z"])
+        _ = mat.node_tree.links.new(pre_combine_uv_node.outputs["Vector"], mapping_node.inputs["Vector"])
+    else:
+        _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], mapping_node.inputs["Vector"])
     if tex_node is not None and separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
         _ = mat.node_tree.links.new(mapping_node.outputs["Vector"], separate_uv_node.inputs["Vector"])
         _ = mat.node_tree.links.new(separate_uv_node.outputs["X"], addr_u_node.inputs[0])

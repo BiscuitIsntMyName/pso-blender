@@ -54,6 +54,90 @@ class Texture:
             Texture._alpha_check_cache[self.name] = self.has_alpha
 
 
+def find_diffuse_image(mat: bpy.types.Material) -> bpy.types.Image | None:
+    """The image a material's texture node plugs in - either a plain Image Texture node found
+    directly in the material, or (for material variants created by this addon's XJ/REL importer)
+    one found one level inside a Group node. Multiple material variants of the same original
+    texture (different blend mode / addressing settings) share a single node group wrapping just
+    that Image Texture node, so swapping the image only has to be done in one shared place - see
+    get_or_create_texture_node_group in xj.py.
+
+    Assumes the first image node found (direct or inside a group) is the correct one.
+    """
+    if mat.node_tree is None:
+        return None
+    for node in mat.node_tree.nodes:
+        if node.type == "TEX_IMAGE":
+            image = cast(bpy.types.ShaderNodeTexImage, node).image
+            if image is not None:
+                return image
+        elif node.type == "GROUP":
+            group_node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
+            if group_node_tree is None:
+                continue
+            for inner_node in group_node_tree.nodes:
+                if inner_node.type == "TEX_IMAGE":
+                    image = cast(bpy.types.ShaderNodeTexImage, inner_node).image
+                    if image is not None:
+                        return image
+    return None
+
+
+def find_material_base_color_image(mat: bpy.types.Material) -> bpy.types.Image | None:
+    """The Base Color / diffuse image of an arbitrary, foreign material (e.g. one dropped in by
+    an asset-browser addon like Poly Haven) - unlike find_diffuse_image, this makes no assumption
+    about the material's structure beyond "a normal Principled BSDF setup", since the material
+    wasn't necessarily created by this addon. A PBR material typically has several Image Texture
+    nodes (base color, normal, roughness, displacement, AO...), so naively grabbing the first one
+    found - or even the first one reachable by walking a single path back from Base Color - risks
+    picking the wrong one: many PBR materials multiply the actual color texture together with a
+    grayscale AO texture right before Base Color, and which of the two inputs comes first on that
+    Mix node isn't something we can assume. So instead this collects every Image Texture node
+    reachable from Base Color (not just the first path found) and prefers one whose colorspace
+    isn't "Non-Color" - the standard tag for channel-data maps (AO/roughness/normal/displacement)
+    as opposed to actual color textures - only falling back to "first Image Texture node found
+    anywhere in the material" if Base Color isn't linked to any image at all.
+    """
+    if mat.node_tree is None:
+        return None
+
+    def is_color_data(image: bpy.types.Image) -> bool:
+        return image.colorspace_settings.name != "Non-Color"
+
+    def collect_images(node: bpy.types.Node, depth: int, visited: set[int]) -> list[bpy.types.Image]:
+        if id(node) in visited or depth > 4:
+            return []
+        visited.add(id(node))
+        if node.type == "TEX_IMAGE":
+            image = cast(bpy.types.ShaderNodeTexImage, node).image
+            return [image] if image is not None else []
+        found: list[bpy.types.Image] = []
+        for input_socket in node.inputs:
+            if input_socket.is_linked:
+                found.extend(collect_images(input_socket.links[0].from_node, depth + 1, visited))
+        return found
+
+    def pick_best(images: list[bpy.types.Image]) -> bpy.types.Image | None:
+        if not images:
+            return None
+        color_images = [img for img in images if is_color_data(img)]
+        return color_images[0] if color_images else images[0]
+
+    principled_node = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if principled_node is not None:
+        base_color_input = cast(bpy.types.ShaderNodeBsdfPrincipled, principled_node).inputs["Base Color"]
+        if base_color_input.is_linked:
+            candidates = collect_images(base_color_input.links[0].from_node, 0, set())
+            best = pick_best(candidates)
+            if best is not None:
+                return best
+
+    all_images = [
+        cast(bpy.types.ShaderNodeTexImage, n).image for n in mat.node_tree.nodes
+        if n.type == "TEX_IMAGE" and cast(bpy.types.ShaderNodeTexImage, n).image is not None]
+    return pick_best(all_images)
+
+
 @cache # This is a surprisingly slow operation so let's use a cache
 def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
     """Assumes the first image node of each material is the correct one"""
@@ -64,16 +148,13 @@ def get_object_diffuse_textures(obj: bpy.types.Object) -> list[Texture]:
     for mat_slot in obj.material_slots:
         if not mat_slot.material or not mat_slot.material.node_tree:
             continue
-        for node in mat_slot.material.node_tree.nodes:
-            if node.type == "TEX_IMAGE":
-                tex_node = cast(bpy.types.ShaderNodeTexImage, node)
-                if tex_node.image is not None:
-                    xj_settings = cast(MaterialWithXjSettings, mat_slot.material).xj_settings
-                    generate_mipmaps = cast(bool, xj_settings.generate_mipmaps)
-                    textures.append(Texture(
-                        id=-1,
-                        material_name=mat_slot.material.name, generate_mipmaps=generate_mipmaps, image=tex_node.image))
-                    break
+        image = find_diffuse_image(mat_slot.material)
+        if image is not None:
+            xj_settings = cast(MaterialWithXjSettings, mat_slot.material).xj_settings
+            generate_mipmaps = cast(bool, xj_settings.generate_mipmaps)
+            textures.append(Texture(
+                id=-1,
+                material_name=mat_slot.material.name, generate_mipmaps=generate_mipmaps, image=image))
     return textures
 
 

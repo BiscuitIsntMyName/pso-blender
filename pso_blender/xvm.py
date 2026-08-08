@@ -210,6 +210,18 @@ class TextureManager:
 def texture_checksum(tex: Texture) -> str:
     data = list(cast(Any, tex.image).pixels)
     data.append(float(tex.generate_mipmaps))
+    # make_xvr() also bakes in the material's Mapping node transform (and, when that transform
+    # isn't identity, its texture addressing mode) - without folding those into the checksum too,
+    # editing only the Mapping node (not the image) would leave the checksum unchanged and the
+    # cache would keep serving a stale .xvr baked from before the edit.
+    mat = bpy.data.materials.get(tex.material_name)
+    if mat is not None:
+        transform = get_material_mapping_transform(mat)
+        if transform is not None:
+            data.extend(float(v) for row in transform for v in row)
+            settings = cast(MaterialWithXjSettings, mat).xj_settings
+            data.append(str(settings.tex_addr_u))
+            data.append(str(settings.tex_addr_v))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
 
 
@@ -294,6 +306,19 @@ def get_material_mapping_transform(mat: bpy.types.Material) -> Matrix | None:
     if mat.node_tree is None:
         return None
     mapping_node = next((n for n in mat.node_tree.nodes if n.type == "MAPPING"), None)
+    if mapping_node is None:
+        # No inline Mapping node - it may be inside the shared per-texture group instead (see
+        # get_or_create_mapping_node_group in xj.py), same two-level search as
+        # util.find_diffuse_image uses for the shared Image Texture node.
+        for node in mat.node_tree.nodes:
+            if node.type != "GROUP":
+                continue
+            group_node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
+            if group_node_tree is None:
+                continue
+            mapping_node = next((n for n in group_node_tree.nodes if n.type == "MAPPING"), None)
+            if mapping_node is not None:
+                break
     if mapping_node is None:
         return None
     location = cast(Any, mapping_node.inputs["Location"]).default_value
