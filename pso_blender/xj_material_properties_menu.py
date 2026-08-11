@@ -77,12 +77,47 @@ NormalType_items = [
 ]
 
 
+def _find_material_img_group_tree(mat: bpy.types.Material) -> bpy.types.ShaderNodeTree | None:
+    """The shared ImgGroup_* node tree this material's texture group node references, if any -
+    see get_or_create_texture_node_group in xj.py. Used to back get/set properties that should be
+    shared across every material variant of the same texture instead of stored separately per
+    material (see XjMaterialSettings.generate_mipmaps below)."""
+    if mat.node_tree is None:
+        return None
+    for node in mat.node_tree.nodes:
+        if node.type != "GROUP":
+            continue
+        node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
+        if node_tree is not None and node_tree.name.startswith("ImgGroup_"):
+            return node_tree
+    return None
+
+
+def _get_generate_mipmaps(self: bpy.types.PropertyGroup) -> bool:
+    group_tree = _find_material_img_group_tree(cast(bpy.types.Material, self.id_data))
+    if group_tree is None:
+        return False
+    return bool(group_tree.get("generate_mipmaps", False))
+
+
+def _set_generate_mipmaps(self: bpy.types.PropertyGroup, value: bool):
+    group_tree = _find_material_img_group_tree(cast(bpy.types.Material, self.id_data))
+    if group_tree is not None:
+        group_tree["generate_mipmaps"] = value
+
+
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class XjMaterialSettings(bpy.types.PropertyGroup):
+    # Shared across every material variant of this texture (stored on the texture's ImgGroup node
+    # tree, see get_or_create_texture_node_group in xj.py / _find_material_img_group_tree above) -
+    # whether the exported texture includes a mip chain is a property of that one shared physical
+    # texture, not of any particular mesh placement, so there's nothing to keep in sync per
+    # material variant here; toggling it on any variant is immediately visible on every other one.
     generate_mipmaps: BoolProperty(
         name="Generate Mipmaps",
-        default=False,
-        description="Generate mipmaps for this texture. Can make exporting very slow.")
+        description="Generate mipmaps for this texture. Can make exporting very slow.",
+        get=_get_generate_mipmaps,
+        set=_set_generate_mipmaps)
     src_blend: EnumProperty(
         name="Source",
         default=str(BlendMode.D3DBLEND_SRCALPHA.name),

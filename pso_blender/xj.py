@@ -786,7 +786,7 @@ def make_texture_addressing_node(node_tree: bpy.types.ShaderNodeTree, addr_mode:
     return math_node
 
 
-def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.types.Image) -> bpy.types.ShaderNodeTree:
+def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.types.Image, generate_mipmaps: bool) -> bpy.types.ShaderNodeTree:
     """A tiny node group wrapping just this texture's Image Texture node, shared by every
     material variant of this texture (different blend mode / addressing settings, see
     make_material) so that swapping which image represents this texture - the whole point of a
@@ -796,6 +796,12 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.ty
     Deliberately does NOT include the UV addressing chain (Mapping / per-axis wrap math nodes) -
     that varies legitimately per variant (e.g. CLAMP addressing on one placement of a texture,
     WRAP on another), so it stays inline in each material rather than being shared here.
+
+    Also carries "generate_mipmaps" as a custom property, stamped once here at creation time. Like
+    the image itself, whether the exported texture includes a mip chain is a property of the one
+    shared physical texture, not of any particular mesh placement - see
+    XjMaterialSettings.generate_mipmaps in xj_material_properties_menu.py, which reads/writes this
+    property instead of storing its own per-material value.
     """
     group_name = "ImgGroup_{}_{}".format(xvm_filename, tex_id)
     existing = bpy.data.node_groups.get(group_name)
@@ -803,6 +809,7 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.ty
         return cast(bpy.types.ShaderNodeTree, existing)
 
     group = cast(bpy.types.ShaderNodeTree, bpy.data.node_groups.new(group_name, "ShaderNodeTree"))
+    group["generate_mipmaps"] = generate_mipmaps
     group.interface.new_socket(name="Vector", in_out="INPUT", socket_type="NodeSocketVector")
     group.interface.new_socket(name="Color", in_out="OUTPUT", socket_type="NodeSocketColor")
     group.interface.new_socket(name="Alpha", in_out="OUTPUT", socket_type="NodeSocketFloat")
@@ -929,7 +936,9 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
     xj_settings.lighting = False
     if tex_id is not None and xj_xvm is not None:
-        xj_settings.generate_mipmaps = bool(xvr.flags & xvm.XvrFlags.MIPMAPS)
+        # generate_mipmaps is NOT set here - it's a property of the shared texture (see
+        # get_or_create_texture_node_group), stamped once when that group is actually created,
+        # further down once the node tree - and thus a place to share it - exists.
         xj_settings.pso_id = xvr.id
         xj_settings.source_xvm_path = xj_xvm.get_full_path()
     for setting in material_settings:
@@ -1026,15 +1035,21 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         # ever one place to swap the image when replacing a texture.
         assert tex_id is not None and xj_xvm is not None
         tex_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
-        tex_node.node_tree = get_or_create_texture_node_group(xj_xvm.get_filename(), tex_id, img)
+        tex_node.node_tree = get_or_create_texture_node_group(
+            xj_xvm.get_filename(), tex_id, img, bool(xvr.flags & xvm.XvrFlags.MIPMAPS))
 
         mapping_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
         mapping_node.node_tree = get_or_create_mapping_node_group(xj_xvm.get_filename(), tex_id)
 
+        # Post-Mapping fold: brings a coordinate the Mapping transform pushed outside [0, 1) back
+        # to a valid position to read from the base image - a property of the image itself (does
+        # it tile seamlessly?), not of this variant's own texture addressing, so this always
+        # wraps regardless of xj_settings.tex_addr_u/v (see bake_material_mapping in xvm.py,
+        # which the export side mirrors exactly the same way).
         separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
         combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
-        addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
-        addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
+        addr_u_node = make_texture_addressing_node(mat.node_tree, TextureAddressingMode.D3DTADDRESS_WRAP.name)
+        addr_v_node = make_texture_addressing_node(mat.node_tree, TextureAddressingMode.D3DTADDRESS_WRAP.name)
 
         pre_separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
         pre_combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))

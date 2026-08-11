@@ -4,6 +4,7 @@ from bpy_extras.io_utils import ExportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from . import xvm, util
+from .util import ModalStepOperator
 from .xj_material_properties_menu import MaterialWithXjSettings
 
 
@@ -27,7 +28,7 @@ def get_original_pso_id_and_source(material_name: str) -> tuple[int, str] | None
 
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 @final
-class ExportXvm(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMethodOverride]
+class ExportXvm(ModalStepOperator, Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMethodOverride]
     "Export XVM"
 
 
@@ -124,10 +125,23 @@ class ExportXvm(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         # texture where the scene has one, otherwise carry the original chunk through byte for
         # byte. This keeps every slot position exactly as the untouched .xj/.rel files expect,
         # even for textures this particular scene doesn't reference at all (other mesh files
-        # sharing this same .xvm might).
-        output_xvrs = [
-            xvm.make_xvr(by_pso_id[base_xvr.id]) if base_xvr.id in by_pso_id else base_xvr
-            for base_xvr in base_xvm.xvrs
-        ]
-        xvm.write_xvrs(filepath, output_xvrs)
-        return {"FINISHED"}
+        # sharing this same .xvm might). Done one xvr at a time via a modal timer (see
+        # ModalStepOperator in util.py) rather than one big blocking loop, so a real progress
+        # indicator can actually be shown for what's usually the slowest part of an export
+        # (DXT compression, optionally with a full mip chain per texture).
+        self._filepath = filepath
+        self._base_xvrs = base_xvm.xvrs
+        self._by_pso_id = by_pso_id
+        self._output_xvrs = []
+        return self.start_modal_steps(context, self._build_output_xvrs(), len(base_xvm.xvrs))
+
+    def _build_output_xvrs(self):
+        for base_xvr in self._base_xvrs:
+            if base_xvr.id in self._by_pso_id:
+                self._output_xvrs.append(xvm.make_xvr(self._by_pso_id[base_xvr.id]))
+            else:
+                self._output_xvrs.append(base_xvr)
+            yield
+
+    def finish(self, context: Context):
+        xvm.write_xvrs(self._filepath, self._output_xvrs)

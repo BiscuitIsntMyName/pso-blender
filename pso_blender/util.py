@@ -1,15 +1,107 @@
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
 from functools import cache
 import math
 from typing import Any, ClassVar, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
-import bpy.types 
+import bpy.types
 from abc import ABC, abstractmethod
 
 from .serialization import Serializable
 
 
 T = TypeVar("T", bound=int | float)
+
+
+class ModalStepOperator:
+    """Mixin for Operator subclasses whose real work is a series of discrete steps (a generator)
+    rather than a single call, driven via a modal timer instead of one big blocking loop.
+
+    This matters because a plain blocking `execute()` loop never gives Blender's UI a chance to
+    redraw until the whole operator finishes - `wm.progress_begin`/`progress_update` calls made
+    from inside such a loop are silently pointless, the indicator never actually appears on
+    screen. Splitting the work into steps and returning control to Blender between each one (via
+    a `TIMER` event) is what actually lets the progress indicator - and the rest of the UI - update
+    while the operator runs.
+
+    Subclasses call `self.start_modal_steps(context, steps, total)` from `execute()`, once any
+    fast synchronous validation has already run and passed, instead of doing the work and
+    returning `{'FINISHED'}` directly. Override `finish(context)` for whatever needs to happen
+    once every step has completed successfully (e.g. writing out the final assembled file).
+    """
+    _modal_timer: bpy.types.Timer | None = None
+    _modal_steps: Generator[None, None, None] | None = None
+    _modal_done: int = 0
+
+    def start_modal_steps(self, context: bpy.types.Context, steps: Generator[None, None, None], total: int):
+        if bpy.app.background:
+            # No window/event loop to pump TIMER events through in headless (--background) mode -
+            # and no UI to show a progress bar in either way - so just run every step
+            # synchronously, exactly like a plain blocking loop would. Only interactive sessions
+            # actually need (and can show) the modal/timer-driven version below.
+            return self._run_steps_synchronously(context, steps)
+        wm = context.window_manager
+        self._modal_steps = steps
+        self._modal_done = 0
+        # A popup (wm.invoke_popup) showing a live progress bar was tried here and crashed
+        # Blender: the popup can outlive the modal operator (it isn't guaranteed to close the
+        # moment the operator finishes), and Blender segfaulted when interacted with while showing
+        # a popup tied to an already-finished operator. Popups are built for interactive property
+        # editing, not an externally-timer-driven live status display, so the two don't mix safely
+        # - sticking with the cursor's built-in percentage overlay instead, which is the one
+        # variant that's actually been confirmed to run to completion and clean up without issue.
+        wm.progress_begin(0, max(1, total))
+        self._modal_timer = wm.event_timer_add(1e-4, window=context.window)
+        wm.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def _run_steps_synchronously(self, context: bpy.types.Context, steps: Generator[None, None, None]):
+        try:
+            for _ in steps:
+                pass
+        except Exception as e:
+            cast(Any, self).report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        try:
+            self.finish(context)
+        except Exception as e:
+            cast(Any, self).report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+        return {"FINISHED"}
+
+    def modal(self, context: bpy.types.Context, event: bpy.types.Event):
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        wm = context.window_manager
+        try:
+            assert self._modal_steps is not None
+            next(self._modal_steps)
+            self._modal_done += 1
+            wm.progress_update(self._modal_done)
+            return {"RUNNING_MODAL"}
+        except StopIteration:
+            self._cleanup_modal_steps(context)
+            try:
+                self.finish(context)
+            except Exception as e:
+                cast(Any, self).report({"ERROR"}, str(e))
+                return {"CANCELLED"}
+            return {"FINISHED"}
+        except Exception as e:
+            self._cleanup_modal_steps(context)
+            cast(Any, self).report({"ERROR"}, str(e))
+            return {"CANCELLED"}
+
+    def _cleanup_modal_steps(self, context: bpy.types.Context):
+        wm = context.window_manager
+        wm.progress_end()
+        if self._modal_timer is not None:
+            wm.event_timer_remove(self._modal_timer)
+            self._modal_timer = None
+
+    def finish(self, context: bpy.types.Context):
+        """Called once every step has completed successfully - override for any final assembly
+        step (e.g. serializing accumulated results out to a file)."""
+        pass
 
 
 def mesh_faces(mesh: bpy.types.Mesh) -> list[tuple[int, int, int]]:

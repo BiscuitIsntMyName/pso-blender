@@ -7,7 +7,6 @@ from mathutils import Vector, Matrix, Euler
 from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
 from .util import magic_bytes, Texture, get_object_diffuse_textures
 from .iff import IffHeader
-from .xj_material_properties_menu import MaterialWithXjSettings
 
 
 from . import xvm_dxt  # pyright: ignore[reportImplicitRelativeImport]
@@ -210,18 +209,14 @@ class TextureManager:
 def texture_checksum(tex: Texture) -> str:
     data = list(cast(Any, tex.image).pixels)
     data.append(float(tex.generate_mipmaps))
-    # make_xvr() also bakes in the material's Mapping node transform (and, when that transform
-    # isn't identity, its texture addressing mode) - without folding those into the checksum too,
-    # editing only the Mapping node (not the image) would leave the checksum unchanged and the
-    # cache would keep serving a stale .xvr baked from before the edit.
+    # make_xvr() also bakes in the material's Mapping node transform - without folding that into
+    # the checksum too, editing only the Mapping node (not the image) would leave the checksum
+    # unchanged and the cache would keep serving a stale .xvr baked from before the edit.
     mat = bpy.data.materials.get(tex.material_name)
     if mat is not None:
         transform = get_material_mapping_transform(mat)
         if transform is not None:
             data.extend(float(v) for row in transform for v in row)
-            settings = cast(MaterialWithXjSettings, mat).xj_settings
-            data.append(str(settings.tex_addr_u))
-            data.append(str(settings.tex_addr_v))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
 
 
@@ -257,24 +252,58 @@ def cache_xvr(path: str, xvr: Xvr):
 MIP_MIN_DIM = 4
 
 
+def _srgb_to_linear(c: float) -> float:
+    if c <= 0.04045:
+        return c / 12.92
+    return ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c: float) -> float:
+    if c <= 0.0:
+        return 0.0
+    if c <= 0.0031308:
+        return c * 12.92
+    return 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+
+# image.pixels are sRGB-encoded (gamma-compressed), not linear light - precomputed once per
+# 8-bit level (matching the precision DXT compression quantizes to anyway, see
+# _DECOMPOSE_RGB565_TABLE in xvm_dxt.py) since downsampling calls this 4x per output texel per
+# color channel, and it's on the hot path for every mip level of every mipmapped texture.
+_SRGB_TO_LINEAR_TABLE: tuple[float, ...] = tuple(_srgb_to_linear(i / 255.0) for i in range(256))
+
+
 def downsample_pixels_2x(pixels: list[float], width: int, height: int, channels: int) -> tuple[list[float], int, int]:
     """2x2 box filter, halving both dimensions. Operates on plain pixel lists rather than
     Blender Image datablocks - Image.copy() + Image.scale() was tried first but produced blank
-    (all-black) results, at least in a --background context."""
+    (all-black) results, at least in a --background context.
+
+    Averages color channels (not alpha) in linear light rather than directly on the sRGB-encoded
+    source values - a plain arithmetic mean of gamma-encoded values isn't the same as the true
+    (linear-light) average, and systematically under-represents small, bright, high-contrast
+    detail (a specular highlight or glow against a darker background) at each successive mip
+    level, making such effects look artificially dimmer at a distance in-game than up close.
+    """
     new_width, new_height = width // 2, height // 2
     result = [0.0] * (new_width * new_height * channels)
+    color_channels = min(channels, 3)
     for y in range(new_height):
         src_y = y * 2
         for x in range(new_width):
             src_x = x * 2
             dst_i = (y * new_width + x) * channels
             for c in range(channels):
+                is_color = c < color_channels
                 total = 0.0
                 for dy in range(2):
                     row_i = (src_y + dy) * width
                     for dx in range(2):
-                        total += pixels[(row_i + src_x + dx) * channels + c]
-                result[dst_i + c] = total / 4.0
+                        val = pixels[(row_i + src_x + dx) * channels + c]
+                        if is_color:
+                            val = _SRGB_TO_LINEAR_TABLE[max(0, min(255, int(val * 255.0)))]
+                        total += val
+                avg = total / 4.0
+                result[dst_i + c] = _linear_to_srgb(avg) if is_color else avg
     return result, new_width, new_height
 
 
@@ -333,36 +362,29 @@ def get_material_mapping_transform(mat: bpy.types.Material) -> Matrix | None:
     return Matrix.LocRotScale(Vector(location), Euler(rotation, "XYZ"), Vector(scale))
 
 
-def _fold_uv_coordinate(s: float, addr_mode: str) -> float:
-    """Folds an arbitrary UV coordinate into [0, 1) the same way the live node graph's per-axis
-    Wrap/Ping-Pong/Clamp math node would (see make_texture_addressing_node in xj.py)."""
-    if addr_mode in ("D3DTADDRESS_MIRROR", "D3DTADDRESS_MIRRORONCE"):
-        t = s % 2.0
-        return t if t < 1.0 else 2.0 - t
-    elif addr_mode in ("D3DTADDRESS_CLAMP", "D3DTADDRESS_BORDER"):
-        return min(1.0, max(0.0, s))
-    else:
-        return s % 1.0
-
-
 def bake_material_mapping(mat: bpy.types.Material, pixels: list[float], width: int, height: int, channels: int) -> list[float]:
     """Resamples pixels (nearest-neighbor) so sampling the result with the mesh's raw UV
     reproduces what the material's Mapping node currently shows in Blender. No-op (returns
-    pixels unchanged) if the material has no Mapping node or it's at its default identity."""
+    pixels unchanged) if the material has no Mapping node or it's at its default identity.
+
+    Folding a coordinate the Mapping transform pushed outside [0, 1) back into a valid position
+    to read from the base image is a property of the image itself (does it tile seamlessly?),
+    not of any particular mesh's texture addressing (WRAP/CLAMP/MIRROR is a per-mesh render
+    state, unrelated to how this bake reads from the source image) - so it's always folded as if
+    the source image tiles on itself, the same assumption an image editor's "wrap around" canvas
+    transform would make, regardless of which addressing mode any variant material actually uses.
+    """
     transform = get_material_mapping_transform(mat)
     if transform is None:
         return pixels
-    settings = cast(MaterialWithXjSettings, mat).xj_settings
-    addr_u = settings.tex_addr_u
-    addr_v = settings.tex_addr_v
     result = [0.0] * (width * height * channels)
     for y in range(height):
         v = (y + 0.5) / height
         for x in range(width):
             u = (x + 0.5) / width
             sample = transform @ Vector((u, v, 0.0))
-            su = _fold_uv_coordinate(sample.x, addr_u)
-            sv = _fold_uv_coordinate(sample.y, addr_v)
+            su = sample.x % 1.0
+            sv = sample.y % 1.0
             src_x = min(width - 1, int(su * width))
             src_y = min(height - 1, int(sv * height))
             src_i = (src_y * width + src_x) * channels

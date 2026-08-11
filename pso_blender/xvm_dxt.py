@@ -117,9 +117,24 @@ def dxt1_compress_block(
         if color0_565 > color1_565:
             # Swap colors to indicate alpha format
             color0_565, color1_565 = color1_565, color0_565
-    # Colors might get swapped by quantization
-    elif color0_565 <= color1_565:
-        color0_565, color1_565 = color1_565, color0_565
+    else:
+        # Colors might get swapped by quantization
+        if color0_565 <= color1_565:
+            color0_565, color1_565 = color1_565, color0_565
+        if color0_565 == color1_565:
+            # A flat/near-uniform block (very common in small mip levels, where heavy downsampling
+            # smooths detail away) can quantize both endpoints to the identical RGB565 value. Real
+            # DXT1 decoders determine 4-color-opaque vs punch-through-alpha purely from color0 <=
+            # color1 (see decode_dxt_colors) - with color0 == color1 that's still true, so this
+            # block would decode in punch-through mode even though this texture has no alpha at
+            # all, and any texel classified to index 3 in that mode comes back fully transparent
+            # (alpha 0, RGB left as whatever the destination buffer was pre-filled with) instead of
+            # this block's actual color - showing through to whatever is rendered behind it. Nudge
+            # color0 up by one 565 step to break the tie and force 4-color opaque mode.
+            if color0_565 < 0xffff:
+                color0_565 += 1
+            else:
+                color1_565 -= 1
     # Compute palette
     palette = dxt_make_color_palette(color0_565, color1_565)
     # Compute pixel palette indices of block
