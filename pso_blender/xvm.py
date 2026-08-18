@@ -5,9 +5,9 @@ import bpy
 import bpy.types
 from mathutils import Vector, Matrix, Euler
 from .serialization import Serializable, Numeric, ResizableBuffer, FixedArray
-from .util import magic_bytes, Texture, get_object_diffuse_textures
+from .util import magic_bytes, Texture, get_object_diffuse_textures, find_material_img_group_tree
+from .xj_material_properties_menu import MaterialWithXjSettings, AlphaCompression
 from .iff import IffHeader
-from .xj_material_properties_menu import MaterialWithXjSettings
 
 
 from . import xvm_dxt  # pyright: ignore[reportImplicitRelativeImport]
@@ -65,6 +65,10 @@ class XvrFormat:
 MIPMAP_TAIL_SIZE_BY_FORMAT = {
     XvrFormat.DXT1: 22,
     XvrFormat.DXT2: 43,
+    # Not independently measured against a real file (no real Ephinea .xvm uses DXT3) - assumed
+    # equal to DXT2's tail size since DXT2 and DXT3 share an identical block byte layout, and the
+    # tail is a property of that layout, not of the alpha semantics.
+    XvrFormat.DXT3: 43,
 }
 
 
@@ -208,8 +212,37 @@ class TextureManager:
 
 
 def texture_checksum(tex: Texture) -> str:
-    data = list(cast(Any, tex.image).pixels)
+    mat = bpy.data.materials.get(tex.material_name)
+    group_tree = find_material_img_group_tree(mat) if mat is not None else None
+    data: list[float] = []
+    if group_tree is not None:
+        # Generic, not hardcoded to "the diffuse image" - make_xvr() may bake the group's actual
+        # Color/Alpha output instead of reading tex.image directly once it's been customized (see
+        # bake_texture_group), so *any* Image Texture node inside the group (PSO_Diffuse, or a
+        # relief composite's PSO_Normal/PSO_Metal, or any future manual node addition) can affect
+        # what actually gets exported - all of them need to invalidate the cache, not just the one
+        # this Texture happens to point at. Sorted by name for a deterministic checksum regardless
+        # of node creation/iteration order.
+        for node in sorted(group_tree.nodes, key=lambda n: n.name):
+            if node.type != "TEX_IMAGE":
+                continue
+            image = cast(bpy.types.ShaderNodeTexImage, node).image
+            if image is not None:
+                data.extend(list(cast(Any, image).pixels))
+    else:
+        data.extend(list(cast(Any, tex.image).pixels))
     data.append(float(tex.generate_mipmaps))
+    # make_xvr() also bakes in the material's Mapping node transform - without folding that into
+    # the checksum too, editing only the Mapping node (not the image) would leave the checksum
+    # unchanged and the cache would keep serving a stale .xvr baked from before the edit.
+    if mat is not None:
+        transform = get_material_mapping_transform(mat)
+        if transform is not None:
+            data.extend(float(v) for row in transform for v in row)
+        # Flipping alpha_compression (Auto/Force DXT1/Force DXT3) changes which DXT format
+        # make_xvr() picks without touching any pixel - without this, the cache would keep
+        # serving a stale .xvr compressed under the old format.
+        data.append(float(AlphaCompression[cast(MaterialWithXjSettings, mat).xj_settings.alpha_compression].value))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
 
 
@@ -245,24 +278,58 @@ def cache_xvr(path: str, xvr: Xvr):
 MIP_MIN_DIM = 4
 
 
+def _srgb_to_linear(c: float) -> float:
+    if c <= 0.04045:
+        return c / 12.92
+    return ((c + 0.055) / 1.055) ** 2.4
+
+
+def _linear_to_srgb(c: float) -> float:
+    if c <= 0.0:
+        return 0.0
+    if c <= 0.0031308:
+        return c * 12.92
+    return 1.055 * (c ** (1.0 / 2.4)) - 0.055
+
+
+# image.pixels are sRGB-encoded (gamma-compressed), not linear light - precomputed once per
+# 8-bit level (matching the precision DXT compression quantizes to anyway, see
+# _DECOMPOSE_RGB565_TABLE in xvm_dxt.py) since downsampling calls this 4x per output texel per
+# color channel, and it's on the hot path for every mip level of every mipmapped texture.
+_SRGB_TO_LINEAR_TABLE: tuple[float, ...] = tuple(_srgb_to_linear(i / 255.0) for i in range(256))
+
+
 def downsample_pixels_2x(pixels: list[float], width: int, height: int, channels: int) -> tuple[list[float], int, int]:
     """2x2 box filter, halving both dimensions. Operates on plain pixel lists rather than
     Blender Image datablocks - Image.copy() + Image.scale() was tried first but produced blank
-    (all-black) results, at least in a --background context."""
+    (all-black) results, at least in a --background context.
+
+    Averages color channels (not alpha) in linear light rather than directly on the sRGB-encoded
+    source values - a plain arithmetic mean of gamma-encoded values isn't the same as the true
+    (linear-light) average, and systematically under-represents small, bright, high-contrast
+    detail (a specular highlight or glow against a darker background) at each successive mip
+    level, making such effects look artificially dimmer at a distance in-game than up close.
+    """
     new_width, new_height = width // 2, height // 2
     result = [0.0] * (new_width * new_height * channels)
+    color_channels = min(channels, 3)
     for y in range(new_height):
         src_y = y * 2
         for x in range(new_width):
             src_x = x * 2
             dst_i = (y * new_width + x) * channels
             for c in range(channels):
+                is_color = c < color_channels
                 total = 0.0
                 for dy in range(2):
                     row_i = (src_y + dy) * width
                     for dx in range(2):
-                        total += pixels[(row_i + src_x + dx) * channels + c]
-                result[dst_i + c] = total / 4.0
+                        val = pixels[(row_i + src_x + dx) * channels + c]
+                        if is_color:
+                            val = _SRGB_TO_LINEAR_TABLE[max(0, min(255, int(val * 255.0)))]
+                        total += val
+                avg = total / 4.0
+                result[dst_i + c] = _linear_to_srgb(avg) if is_color else avg
     return result, new_width, new_height
 
 
@@ -275,6 +342,15 @@ def generate_mip_levels(pixels: list[float], width: int, height: int, channels: 
         cur_pixels, w, h = downsample_pixels_2x(cur_pixels, w, h, channels)
         levels.append((cur_pixels, w, h))
     return levels
+
+
+# How dark a fully-tilted normal-map pixel / fully-metal pixel can push a diffuse pixel to, at
+# most. Fixed defaults for now - can become tunable once the effect's been seen on real assets.
+# Read into the relief-composite node graph's default values at creation time (see
+# xj._wire_relief_composite) rather than hand-copied there, so there's exactly one place these
+# numbers are defined even though the formula itself is expressed as nodes, not Python.
+_RELIEF_MIN_DARKEN = 0.6
+_METAL_MAX_DARKEN = 0.7
 
 
 _MAPPING_IDENTITY_LOCATION = (0.0, 0.0, 0.0)
@@ -295,6 +371,19 @@ def get_material_mapping_transform(mat: bpy.types.Material) -> Matrix | None:
         return None
     mapping_node = next((n for n in mat.node_tree.nodes if n.type == "MAPPING"), None)
     if mapping_node is None:
+        # No inline Mapping node - it may be inside the shared per-texture group instead (see
+        # get_or_create_mapping_node_group in xj.py), same two-level search as
+        # util.find_diffuse_image uses for the shared Image Texture node.
+        for node in mat.node_tree.nodes:
+            if node.type != "GROUP":
+                continue
+            group_node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
+            if group_node_tree is None:
+                continue
+            mapping_node = next((n for n in group_node_tree.nodes if n.type == "MAPPING"), None)
+            if mapping_node is not None:
+                break
+    if mapping_node is None:
         return None
     location = cast(Any, mapping_node.inputs["Location"]).default_value
     rotation = cast(Any, mapping_node.inputs["Rotation"]).default_value
@@ -308,36 +397,172 @@ def get_material_mapping_transform(mat: bpy.types.Material) -> Matrix | None:
     return Matrix.LocRotScale(Vector(location), Euler(rotation, "XYZ"), Vector(scale))
 
 
-def _fold_uv_coordinate(s: float, addr_mode: str) -> float:
-    """Folds an arbitrary UV coordinate into [0, 1) the same way the live node graph's per-axis
-    Wrap/Ping-Pong/Clamp math node would (see make_texture_addressing_node in xj.py)."""
-    if addr_mode in ("D3DTADDRESS_MIRROR", "D3DTADDRESS_MIRRORONCE"):
-        t = s % 2.0
-        return t if t < 1.0 else 2.0 - t
-    elif addr_mode in ("D3DTADDRESS_CLAMP", "D3DTADDRESS_BORDER"):
-        return min(1.0, max(0.0, s))
-    else:
-        return s % 1.0
+def _is_default_texture_group_wiring(group_tree: bpy.types.ShaderNodeTree) -> bool:
+    """True if the shared ImgGroup's Color output is still linked directly from the diffuse
+    (PSO_Diffuse) Image Texture node - i.e. nothing (no relief composite, no other manual node
+    edit) has been wired in between. Named-based check, not identity (`is`) - separate attribute
+    accesses on the same underlying node can return distinct Python wrapper objects in bpy, so
+    `from_node is diffuse_node` is not a reliable comparison, only `.name` is."""
+    group_output = next((n for n in group_tree.nodes if n.type == "GROUP_OUTPUT"), None)
+    if group_output is None:
+        return True
+    color_input = group_output.inputs.get("Color")
+    if color_input is None or not color_input.is_linked:
+        return True
+    return color_input.links[0].from_node.name == "PSO_Diffuse"
+
+
+def bake_texture_group(group_tree: bpy.types.ShaderNodeTree, width: int, height: int) -> "list[float] | None":
+    """Bakes group_tree's actual Color/Alpha output - whatever it currently computes, generically,
+    not a hardcoded formula - into a flat pixel buffer, or returns None if the group is still the
+    plain default (Color fed directly from PSO_Diffuse) so the caller can just read the diffuse
+    image's pixels directly instead, exactly like every texture without a relief composite already
+    does. Only textures actually customized via _wire_relief_composite (xj.py) - or any future
+    manual node edit inside the group - pay the cost of a real bake; ordinary textures are
+    completely unaffected, both in output (byte-for-byte identical to today) and performance.
+
+    Two separate Cycles EMIT bake passes, verified necessary: a single bake capturing color through
+    an Emission shader always comes back with alpha pinned to 1.0 regardless of the graph feeding
+    it (confirmed empirically - not fixable via render/film settings) - Cycles' EMIT pass type only
+    ever represents emitted light color, with no concept of the transparency channel an exported
+    image needs. Treating the group's Alpha output as a plain grayscale "color" and baking it
+    through its own Emission, separately, sidesteps this entirely and reproduces the source alpha
+    exactly (also verified empirically). Interpolation is left at each Image Texture node's own
+    setting (matches whatever the live viewport already shows) and the color pass baked at whatever
+    Blender pixel precision it naturally computes at - not attempting to force bit-exact parity
+    with a raw pixel read on purpose, since this path is only reached once the user has already
+    deliberately customized the texture, not for anything reachable through the "unchanged" path
+    above.
+    """
+    if _is_default_texture_group_wiring(group_tree):
+        return None
+
+    context = bpy.context
+    scene = context.scene
+    if scene is None:
+        return None
+
+    # Save every scene setting this touches so baking a texture never leaves the user's actual
+    # file in a different state than before the export ran.
+    original_engine = scene.render.engine
+    original_samples = scene.cycles.samples
+    original_view_transform = scene.view_settings.view_transform
+    original_selected = list(context.selected_objects) if context.selected_objects else []
+    original_active = context.view_layer.objects.active if context.view_layer else None
+
+    temp_obj: bpy.types.Object | None = None
+    temp_mesh: bpy.types.Mesh | None = None
+    temp_mat: bpy.types.Material | None = None
+    color_target: bpy.types.Image | None = None
+    alpha_target: bpy.types.Image | None = None
+    try:
+        scene.render.engine = "CYCLES"
+        scene.cycles.samples = 1
+        scene.view_settings.view_transform = "Standard"
+
+        temp_mesh = bpy.data.meshes.new("PSO_BakePlane")
+        temp_mesh.from_pydata([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)], [], [[0, 1, 2, 3]])
+        uv_layer = temp_mesh.uv_layers.new(name="UVMap")
+        for i, uv in enumerate([(0, 0), (1, 0), (1, 1), (0, 1)]):
+            uv_layer.data[i].uv = uv
+        temp_mesh.update()
+        temp_obj = bpy.data.objects.new("PSO_BakeObj", temp_mesh)
+        scene.collection.objects.link(temp_obj)
+
+        temp_mat = bpy.data.materials.new("PSO_BakeMat")
+        temp_mat.use_nodes = True
+        tree = temp_mat.node_tree
+        for n in list(tree.nodes):
+            tree.nodes.remove(n)
+        group_node = cast(bpy.types.ShaderNodeGroup, tree.nodes.new(type="ShaderNodeGroup"))
+        group_node.node_tree = group_tree
+        tex_coord = tree.nodes.new(type="ShaderNodeTexCoord")
+        emission = cast(bpy.types.ShaderNodeEmission, tree.nodes.new(type="ShaderNodeEmission"))
+        output = tree.nodes.new(type="ShaderNodeOutputMaterial")
+        _ = tree.links.new(tex_coord.outputs["UV"], group_node.inputs["Vector"])
+        _ = tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
+        temp_obj.data.materials.append(temp_mat)
+
+        context.view_layer.objects.active = temp_obj
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        temp_obj.select_set(True)
+
+        # Pass 1: color
+        _ = tree.links.new(group_node.outputs["Color"], emission.inputs["Color"])
+        color_target = bpy.data.images.new("PSO_BakeColor", width, height, alpha=True)
+        color_target.colorspace_settings.name = "sRGB"
+        color_tex_node = cast(bpy.types.ShaderNodeTexImage, tree.nodes.new(type="ShaderNodeTexImage"))
+        color_tex_node.image = color_target
+        tree.nodes.active = color_tex_node
+        bpy.ops.object.bake(type="EMIT")
+        color_pixels = list(cast(Any, color_target).pixels)
+
+        # Pass 2: alpha, treated as a plain grayscale "color" so it survives the bake (see
+        # docstring) - duplicated across R/G/B via Combine Color, read back from channel 0.
+        combine = tree.nodes.new(type="ShaderNodeCombineColor")
+        _ = tree.links.new(group_node.outputs["Alpha"], combine.inputs["Red"])
+        _ = tree.links.new(group_node.outputs["Alpha"], combine.inputs["Green"])
+        _ = tree.links.new(group_node.outputs["Alpha"], combine.inputs["Blue"])
+        _ = tree.links.new(combine.outputs["Color"], emission.inputs["Color"])
+        alpha_target = bpy.data.images.new("PSO_BakeAlpha", width, height, alpha=True)
+        alpha_target.colorspace_settings.name = "Non-Color"
+        alpha_tex_node = cast(bpy.types.ShaderNodeTexImage, tree.nodes.new(type="ShaderNodeTexImage"))
+        alpha_tex_node.image = alpha_target
+        tree.nodes.active = alpha_tex_node
+        bpy.ops.object.bake(type="EMIT")
+        alpha_pixels = list(cast(Any, alpha_target).pixels)
+
+        result = [0.0] * (width * height * 4)
+        for i in range(width * height):
+            result[i * 4 + 0] = color_pixels[i * 4 + 0]
+            result[i * 4 + 1] = color_pixels[i * 4 + 1]
+            result[i * 4 + 2] = color_pixels[i * 4 + 2]
+            result[i * 4 + 3] = alpha_pixels[i * 4 + 0]
+        return result
+    finally:
+        if temp_obj is not None:
+            bpy.data.objects.remove(temp_obj, do_unlink=True)
+        if temp_mesh is not None and temp_mesh.name in bpy.data.meshes:
+            bpy.data.meshes.remove(temp_mesh)
+        if temp_mat is not None and temp_mat.name in bpy.data.materials:
+            bpy.data.materials.remove(temp_mat)
+        if color_target is not None and color_target.name in bpy.data.images:
+            bpy.data.images.remove(color_target)
+        if alpha_target is not None and alpha_target.name in bpy.data.images:
+            bpy.data.images.remove(alpha_target)
+        scene.render.engine = original_engine
+        scene.cycles.samples = original_samples
+        scene.view_settings.view_transform = original_view_transform
+        if context.view_layer:
+            for obj in context.view_layer.objects:
+                obj.select_set(obj in original_selected)
+            context.view_layer.objects.active = original_active
 
 
 def bake_material_mapping(mat: bpy.types.Material, pixels: list[float], width: int, height: int, channels: int) -> list[float]:
     """Resamples pixels (nearest-neighbor) so sampling the result with the mesh's raw UV
     reproduces what the material's Mapping node currently shows in Blender. No-op (returns
-    pixels unchanged) if the material has no Mapping node or it's at its default identity."""
+    pixels unchanged) if the material has no Mapping node or it's at its default identity.
+
+    Folding a coordinate the Mapping transform pushed outside [0, 1) back into a valid position
+    to read from the base image is a property of the image itself (does it tile seamlessly?),
+    not of any particular mesh's texture addressing (WRAP/CLAMP/MIRROR is a per-mesh render
+    state, unrelated to how this bake reads from the source image) - so it's always folded as if
+    the source image tiles on itself, the same assumption an image editor's "wrap around" canvas
+    transform would make, regardless of which addressing mode any variant material actually uses.
+    """
     transform = get_material_mapping_transform(mat)
     if transform is None:
         return pixels
-    settings = cast(MaterialWithXjSettings, mat).xj_settings
-    addr_u = settings.tex_addr_u
-    addr_v = settings.tex_addr_v
     result = [0.0] * (width * height * channels)
     for y in range(height):
         v = (y + 0.5) / height
         for x in range(width):
             u = (x + 0.5) / width
             sample = transform @ Vector((u, v, 0.0))
-            su = _fold_uv_coordinate(sample.x, addr_u)
-            sv = _fold_uv_coordinate(sample.y, addr_v)
+            su = sample.x % 1.0
+            sv = sample.y % 1.0
             src_x = min(width - 1, int(su * width))
             src_y = min(height - 1, int(sv * height))
             src_i = (src_y * width + src_x) * channels
@@ -359,22 +584,68 @@ def make_xvr(tex: Texture) -> Xvr:
         elif tex.image.alpha_mode != "STRAIGHT":
             raise Exception("XVR Error in Image '{}': Image has unsupported alpha mode '{}'".format(tex.image.filepath, tex.image.alpha_mode))
         flags |= XvrFlags.ALPHA
+
+    channels = tex.image.channels
+    mat = bpy.data.materials.get(tex.material_name)
+    group_tree = find_material_img_group_tree(mat) if mat is not None else None
+    baked = bake_texture_group(group_tree, img_width, img_height) if group_tree is not None else None
+    if baked is not None:
+        # The texture's shared ImgGroup has been customized (e.g. a relief composite - see
+        # xj._wire_relief_composite) beyond its plain default wiring - use what it actually
+        # computes instead of the diffuse image's raw pixels. Always 4-channel RGBA regardless of
+        # tex.image.channels, since bake_texture_group's two bake passes always produce RGBA.
+        pixels = baked
+        channels = 4
+    else:
+        pixels = list(cast(Any, tex.image).pixels)
+    if mat is not None:
+        pixels = bake_material_mapping(mat, pixels, img_width, img_height, channels)
+
     # DXT1's alpha is 1-bit (transparent or opaque) via a punch-through color-ordering trick.
     # A PREMUL-alpha source (imported from DXT2/DXT4) has smooth alpha and pixels already
     # multiplied by alpha, matching DXT2's explicit 4-bit-per-pixel alpha block - use that
-    # instead of collapsing it down to DXT1's binary alpha.
-    xvr_format = XvrFormat.DXT2 if is_premultiplied else XvrFormat.DXT1
+    # instead of collapsing it down to DXT1's binary alpha. A STRAIGHT-alpha source (the common
+    # case - any freshly imported PNG) gets the same explicit-alpha treatment, but as DXT3
+    # (unmultiplied, unlike DXT2), whenever its alpha channel turns out to have genuine gradation
+    # rather than just a hard cutout mask - see xj_material_properties_menu.AlphaCompression for
+    # the per-texture override that lets this auto-detection be forced either way.
+    if is_premultiplied:
+        xvr_format = XvrFormat.DXT2
+    elif not tex.has_alpha:
+        xvr_format = XvrFormat.DXT1
+    else:
+        alpha_compression = cast(MaterialWithXjSettings, mat).xj_settings.alpha_compression if mat is not None else "AUTO"
+        if alpha_compression == "FORCE_DXT1":
+            xvr_format = XvrFormat.DXT1
+        elif alpha_compression == "FORCE_DXT3":
+            xvr_format = XvrFormat.DXT3
+        elif alpha_compression == "FORCE_DXT2":
+            # Unlike FORCE_DXT1/FORCE_DXT3, this isn't just a different codec over the same
+            # pixels - DXT2's colors are premultiplied by alpha, a real data transform this
+            # texture's source pixels haven't gone through (is_premultiplied is False here by
+            # construction - an already-premultiplied source takes the branch above instead).
+            # Intended for deliberately matching a premultiplied-alpha blend mode
+            # (src=ONE, dst=INVSRCALPHA) - print a heads-up if this material's blend mode looks
+            # like it isn't set up for that, since a mismatch would look visibly wrong in-game.
+            if mat is not None:
+                xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
+                if xj_settings.src_blend != "D3DBLEND_ONE" or xj_settings.dst_blend != "D3DBLEND_INVSRCALPHA":
+                    print("XVM Notice: Material '{}' forces DXT2 (premultiplied alpha) but its blend "
+                          "mode is {}/{}, not the usual ONE/INVSRCALPHA premultiplied pair - the "
+                          "in-game result may look wrong.".format(mat.name, xj_settings.src_blend, xj_settings.dst_blend))
+            pixels = xvm_dxt.premultiply_alpha(pixels, channels)
+            xvr_format = XvrFormat.DXT2
+        elif xvm_dxt.image_has_smooth_alpha(pixels, channels):
+            xvr_format = XvrFormat.DXT3
+        else:
+            xvr_format = XvrFormat.DXT1
 
     def compress(px: list[float], w: int, h: int, channels: int) -> bytearray:
-        if is_premultiplied:
+        if xvr_format in (XvrFormat.DXT2, XvrFormat.DXT3):
             return xvm_dxt.compress_image_dxt3(px, w, h, channels)
         return xvm_dxt.compress_image(px, w, h, channels, tex.has_alpha)
 
-    pixels = cast(list[float], cast(Any, tex.image).pixels)
-    mat = bpy.data.materials.get(tex.material_name)
-    if mat is not None:
-        pixels = bake_material_mapping(mat, list(pixels), img_width, img_height, tex.image.channels)
-    data = compress(list(pixels), img_width, img_height, tex.image.channels)
+    data = compress(list(pixels), img_width, img_height, channels)
     if tex.generate_mipmaps:
         # Real game .xvm files store an actual compressed mip pyramid immediately after the base
         # level's data (verified by decoding the real bytes: a standard halve-until-4x4 chain
@@ -382,8 +653,8 @@ def make_xvr(tex: Texture) -> Xvr:
         # (4x4) level - confirmed by byte-counting real files, content doesn't appear to matter.
         # This whole region lives inside data_size, unlike the separate fixed all-zero trailer
         # below (which sits outside data_size, only inside body_size).
-        for (level_pixels, level_width, level_height) in generate_mip_levels(list(pixels), img_width, img_height, tex.image.channels):
-            data += compress(level_pixels, level_width, level_height, tex.image.channels)
+        for (level_pixels, level_width, level_height) in generate_mip_levels(list(pixels), img_width, img_height, channels):
+            data += compress(level_pixels, level_width, level_height, channels)
         data += bytes(2)
     data_size = len(data)
     if tex.generate_mipmaps:

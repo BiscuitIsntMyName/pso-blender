@@ -1,5 +1,6 @@
 import math, os
-from typing import Literal, cast, final
+from collections.abc import Generator
+from typing import Any, Literal, cast, final
 from mathutils import Vector
 from dataclasses import dataclass, field
 from warnings import warn
@@ -311,7 +312,18 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
         tam.write(tam_path, texture_man, objects)
 
 
-def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
+def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any]) -> Generator[None, None, None]:
+    """Does the exact same work as read() below, but one mesh tree at a time, yielding after
+    each one - lets a caller (see ModalStepOperator in util.py) drive this via a modal timer
+    instead of one big blocking call, so a real progress indicator can be shown for what's
+    usually the slowest part of an import (building each tree's mesh geometry).
+
+    Since a generator can't just be called and immediately handed a return value the way a plain
+    function can, results are written into the caller-supplied `result` dict instead: `"total"`
+    (the number of trees, for sizing a progress bar) as soon as it's known - before any of the
+    actual per-tree work below has run - and `"collection"` (the finished top-level Collection)
+    from that point on, filled in with new content on every subsequent step.
+    """
     with open(path, "rb") as f:
         rel = Rel.read_from(bytearray(f.read()))
     if rel.payload_offset is None:
@@ -327,10 +339,15 @@ def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
     else:
         raise Exception("Unknown n.rel format '{}'".format(fmt_magic))
 
-    collection = bpy.data.collections.new(path)
-    world_scale = util.get_pso_world_scale()
+    chunks = nrel.chunks.deref_array(nrel.chunk_count)
+    result["total"] = sum(chunk.static_mesh_tree_count for chunk in chunks)
 
-    for chunk in nrel.chunks.deref_array(nrel.chunk_count):
+    collection = bpy.data.collections.new(path)
+    result["collection"] = collection
+    world_scale = util.get_pso_world_scale()
+    yield  # Header parsed, result["total"] is now valid - no per-tree work has happened yet.
+
+    for chunk in chunks:
         chunk_coll = bpy.data.collections.new("chunk_" + str(chunk.id))
         collection.children.link(chunk_coll)
         chunk_coll["chunk_offset"] = hex(chunk.get_offset())
@@ -368,5 +385,11 @@ def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
             # Remove now empty collection
             bpy.data.collections.remove(models)
             tree_counter += 1
+            yield
 
-    return collection
+
+def read(path: str, nrel_xvm: xvm.Xvm | None) -> bpy.types.Collection:
+    result: dict[str, Any] = {}
+    for _ in read_steps(path, nrel_xvm, result):
+        pass
+    return cast(bpy.types.Collection, result["collection"])

@@ -66,13 +66,67 @@ def dxt_make_color_palette(color0: int, color1: int) -> tuple[RGB, RGB, RGB, RGB
     return (palette0, palette1, palette2, palette3)
 
 
+def dxt1_block_needs_alpha(
+        pixels: list[float],
+        x: int, y: int,
+        img_width: int, block_dim: int,
+        src_channels: int
+    ) -> bool:
+    """True if this specific 4x4 block contains at least one meaningfully-transparent texel
+    (alpha < 0.5 - the conventional DXT1 punch-through cutoff, matching mainstream encoders).
+    Punch-through mode only has 3 usable opaque palette colors instead of 4, so it should only be
+    forced on the blocks that actually need it - applying it image-wide (keyed off the whole
+    texture's has_alpha flag rather than this per-block check) needlessly throws away color
+    fidelity everywhere else, and - combined with too strict a per-texel cutoff - can misclassify
+    ordinary antialiased near-opaque edges (alpha like 0.996) as meant to be transparent."""
+    for block_y in range(block_dim):
+        for block_x in range(block_dim):
+            src_offset = img_width * ((y + block_y) * src_channels) + ((x + block_x) * src_channels)
+            if pixels[src_offset + 3] < 0.5:
+                return True
+    return False
+
+
+def image_has_smooth_alpha(pixels: list[float], channels: int) -> bool:
+    """True if this image's alpha channel has genuine intermediate values (not just a hard
+    cutout mask near-fully-transparent or near-fully-opaque) - used to decide whether a texture
+    needs DXT3's explicit 16-level alpha instead of DXT1's 1-bit punch-through alpha. The 0.06/0.94
+    margin mirrors dxt1_block_needs_alpha's 0.5 punch-through cutoff in spirit: real cutout masks
+    (leaves, grates with hard edges) still have some antialiasing noise right at their edges, so
+    the threshold has to tolerate that without triggering, while catching a genuine soft gradient
+    (e.g. a fading decal or soft shadow)."""
+    if channels < 4:
+        return False
+    for i in range(3, len(pixels), channels):
+        if 0.06 < pixels[i] < 0.94:
+            return True
+    return False
+
+
+def premultiply_alpha(pixels: list[float], channels: int) -> list[float]:
+    """Multiplies each texel's RGB by its own alpha, in place in the same (already gamma-encoded,
+    not linearized) value space image.pixels provides - matching how this engine's existing DXT2
+    textures are actually stored (no linear-light round trip), so a freshly force-compressed DXT2
+    texture stays byte-for-byte consistent with how an original, already-premultiplied DXT2
+    texture behaves once decompressed."""
+    if channels < 4:
+        return pixels
+    result = list(pixels)
+    for i in range(0, len(result), channels):
+        alpha = result[i + 3]
+        result[i] *= alpha
+        result[i + 1] *= alpha
+        result[i + 2] *= alpha
+    return result
+
+
 def dxt1_palettize_block(
         pixels: list[float],
         palette: tuple[RGB, RGB, RGB],
         x: int, y: int,
         img_width: int, block_dim: int,
         src_channels: int,
-        with_alpha: int
+        with_alpha: bool
     ) -> int:
     palette_indices = 0
     px_idx = 0
@@ -82,7 +136,7 @@ def dxt1_palettize_block(
             src_offset = img_width * ((y + block_y) * src_channels) + ((x + block_x) * src_channels)
             best_color_dist = float("inf")
             best_palette_idx = 0
-            if with_alpha and pixels[src_offset + 3] < 1.0:
+            if with_alpha and pixels[src_offset + 3] < 0.5:
                 best_palette_idx = 3
             else:
                 # Find best palette color for pixel
@@ -113,17 +167,36 @@ def dxt1_compress_block(
     color0, color1 = dxt_get_block_bounds(pixels, coords[0], coords[1], img_width, block_dim, src_channels)
     # Quantize
     color0_565, color1_565 = dxt_quantize(color0, color1)
-    if with_alpha:
+    # Punch-through mode (color0 <= color1) is a per-block decision, not the whole image's - a
+    # block with no meaningfully-transparent texel of its own should stay in normal 4-color opaque
+    # mode (one more usable color) even inside an otherwise alpha-enabled image.
+    block_needs_alpha = with_alpha and dxt1_block_needs_alpha(pixels, coords[0], coords[1], img_width, block_dim, src_channels)
+    if block_needs_alpha:
         if color0_565 > color1_565:
             # Swap colors to indicate alpha format
             color0_565, color1_565 = color1_565, color0_565
-    # Colors might get swapped by quantization
-    elif color0_565 <= color1_565:
-        color0_565, color1_565 = color1_565, color0_565
+    else:
+        # Colors might get swapped by quantization
+        if color0_565 <= color1_565:
+            color0_565, color1_565 = color1_565, color0_565
+        if color0_565 == color1_565:
+            # A flat/near-uniform block (very common in small mip levels, where heavy downsampling
+            # smooths detail away) can quantize both endpoints to the identical RGB565 value. Real
+            # DXT1 decoders determine 4-color-opaque vs punch-through-alpha purely from color0 <=
+            # color1 (see decode_dxt_colors) - with color0 == color1 that's still true, so this
+            # block would decode in punch-through mode even though this texture has no alpha at
+            # all, and any texel classified to index 3 in that mode comes back fully transparent
+            # (alpha 0, RGB left as whatever the destination buffer was pre-filled with) instead of
+            # this block's actual color - showing through to whatever is rendered behind it. Nudge
+            # color0 up by one 565 step to break the tie and force 4-color opaque mode.
+            if color0_565 < 0xffff:
+                color0_565 += 1
+            else:
+                color1_565 -= 1
     # Compute palette
     palette = dxt_make_color_palette(color0_565, color1_565)
     # Compute pixel palette indices of block
-    palette_indices = dxt1_palettize_block(pixels, palette[0:3], coords[0], coords[1], img_width, block_dim, src_channels, with_alpha)
+    palette_indices = dxt1_palettize_block(pixels, palette[0:3], coords[0], coords[1], img_width, block_dim, src_channels, block_needs_alpha)
     return (color0_565, color1_565, palette_indices)
 
 

@@ -15,7 +15,18 @@ from .bml_export_menu import ExportBml
 from .xj_import_menu import ImportXj
 from .xj_export_menu import ExportXj
 from .xvm_export_menu import ExportXvm
-from .xj_material_properties_menu import XjMaterialSettings, XjMaterialSettingsPanel, XjSelectMaterialEverywhere
+from .xj_material_properties_menu import (
+    XjMaterialSettings,
+    XjMaterialSettingsPanel,
+    XjSelectMaterialEverywhere,
+    XjSendImageToImgGroup,
+    XjSendAssetToImgGroup,
+    XjSendAssetPackToImgGroup,
+    XjSendFileToImgGroup,
+    draw_send_to_imggroup_menu_item,
+    draw_send_asset_to_imggroup_menu_item,
+    draw_send_asset_pack_to_imggroup_menu_item,
+    draw_send_file_to_imggroup_menu_item)
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 
 
@@ -74,6 +85,10 @@ classes = [
     XjMaterialSettings,
     XjMaterialSettingsPanel,
     XjSelectMaterialEverywhere,
+    XjSendImageToImgGroup,
+    XjSendAssetToImgGroup,
+    XjSendAssetPackToImgGroup,
+    XjSendFileToImgGroup,
     NjcmNodeSettings,
     NjcmNodeSettingsPanel
 ]
@@ -87,6 +102,10 @@ def register():
     # Add buttons to export and import menus
     bpy.types.TOPBAR_MT_file_export.append(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    bpy.types.NODE_MT_context_menu.append(draw_send_to_imggroup_menu_item)
+    bpy.types.ASSETBROWSER_MT_context_menu.append(draw_send_asset_to_imggroup_menu_item)
+    bpy.types.ASSETBROWSER_MT_context_menu.append(draw_send_asset_pack_to_imggroup_menu_item)
+    bpy.types.FILEBROWSER_MT_context_menu.append(draw_send_file_to_imggroup_menu_item)
     # Add settings to objects
     object_as_any = cast(Any, bpy.types.Object)
     object_as_any.rel_settings = PointerProperty(type=MeshRelSettings)
@@ -103,6 +122,10 @@ def unregister():
         bpy.utils.unregister_class(clazz)
     bpy.types.TOPBAR_MT_file_export.remove(menu_func_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+    bpy.types.NODE_MT_context_menu.remove(draw_send_to_imggroup_menu_item)
+    bpy.types.ASSETBROWSER_MT_context_menu.remove(draw_send_asset_to_imggroup_menu_item)
+    bpy.types.ASSETBROWSER_MT_context_menu.remove(draw_send_asset_pack_to_imggroup_menu_item)
+    bpy.types.FILEBROWSER_MT_context_menu.remove(draw_send_file_to_imggroup_menu_item)
     del cast(Any, bpy.types.Object).rel_settings
     del cast(Any, bpy.types.Object).njcm_settings
     del cast(Any, bpy.types.Material).xj_settings

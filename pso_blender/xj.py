@@ -563,11 +563,18 @@ def write_vertex_buffer(
 
 class MaterialStrips:
     material_index: int
+    material_name: str | None
     renderstate_args: list[RenderStateArgs]
     strips: list[list[int]]
 
     def __init__(self, material_index: int, material: bpy.types.Material | None, strips: list[list[int]]):
         self.material_index = material_index
+        # Used by write_index_buffers to look up this strip's texture by material identity
+        # instead of assuming positional alignment with texture_man.get_object_textures(obj) -
+        # that list additionally skips any material with no resolvable diffuse image, so a
+        # position-based lookup silently misaligns (or goes out of range) as soon as any earlier
+        # slot on the object has no texture.
+        self.material_name = material.name if material else None
         if material:
             xj_settings = cast(MaterialWithXjSettings, material).xj_settings
             self.renderstate_args = make_renderstate_args(
@@ -621,6 +628,13 @@ def write_index_buffers(
     opaque_index_buffer_containers: list[IndexBufferContainer] = []
     alpha_index_buffer_containers: list[IndexBufferContainer] = []
     textures = texture_man.get_object_textures(obj)
+    # Looked up by material identity (name), not position - textures skips any material slot with
+    # no resolvable diffuse image (see util.get_object_diffuse_textures), which material_strips
+    # does not, so the two lists aren't guaranteed to line up positionally as soon as any slot on
+    # this object has a material but no texture (a legitimate, real case - e.g. a solid-color
+    # material) - a positional index lookup here previously raised IndexError, or worse silently
+    # paired a strip with the wrong texture.
+    textures_by_material_name = {tex.material_name: tex for tex in textures}
     texture_id_base = texture_man.get_base_id()
     for material_strip_data in material_strips:
         for strip in material_strip_data.strips:
@@ -631,11 +645,10 @@ def write_index_buffers(
             # Create render state args
             first_rs_arg_ptr = NULLPTR
             rs_args = material_strip_data.renderstate_args
-            if len(textures) > 0:
-                tex = textures[material_strip_data.material_index]
+            tex = textures_by_material_name.get(material_strip_data.material_name)
+            if tex is not None:
                 has_alpha = has_alpha or tex.has_alpha
                 rs_args += make_renderstate_args(
-                    # XXX: Assumes material index matches index of texture in this array
                     texture_id=tex.id - texture_id_base)
             rs_arg_count = len(rs_args)
             for rs_arg in rs_args:
@@ -786,6 +799,267 @@ def make_texture_addressing_node(node_tree: bpy.types.ShaderNodeTree, addr_mode:
     return math_node
 
 
+def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.types.Image, generate_mipmaps: bool) -> bpy.types.ShaderNodeTree:
+    """A tiny node group wrapping just this texture's Image Texture node, shared by every
+    material variant of this texture (different blend mode / addressing settings, see
+    make_material) so that swapping which image represents this texture - the whole point of a
+    texture pack - only has to be done once, in one shared place, instead of on every variant
+    material separately.
+
+    Deliberately does NOT include the UV addressing chain (Mapping / per-axis wrap math nodes) -
+    that varies legitimately per variant (e.g. CLAMP addressing on one placement of a texture,
+    WRAP on another), so it stays inline in each material rather than being shared here.
+
+    Also carries "generate_mipmaps" as a custom property, stamped once here at creation time. Like
+    the image itself, whether the exported texture includes a mip chain is a property of the one
+    shared physical texture, not of any particular mesh placement - see
+    XjMaterialSettings.generate_mipmaps in xj_material_properties_menu.py, which reads/writes this
+    property instead of storing its own per-material value.
+    """
+    group_name = "ImgGroup_{}_{}".format(xvm_filename, tex_id)
+    existing = bpy.data.node_groups.get(group_name)
+    if existing is not None:
+        return cast(bpy.types.ShaderNodeTree, existing)
+
+    group = cast(bpy.types.ShaderNodeTree, bpy.data.node_groups.new(group_name, "ShaderNodeTree"))
+    group["generate_mipmaps"] = generate_mipmaps
+    group.interface.new_socket(name="Vector", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Color", in_out="OUTPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket(name="Alpha", in_out="OUTPUT", socket_type="NodeSocketFloat")
+
+    group_input = group.nodes.new(type="NodeGroupInput")
+    group_output = group.nodes.new(type="NodeGroupOutput")
+    tex_image_node = cast(bpy.types.ShaderNodeTexImage, group.nodes.new(type="ShaderNodeTexImage"))
+    # Named explicitly (rather than relying on "the only TEX_IMAGE node in this group") so
+    # find_diffuse_image can reliably tell this apart from the optional PSO_Normal/PSO_Metal
+    # nodes a relief composite (see _wire_relief_composite below) may add to the same group.
+    tex_image_node.name = "PSO_Diffuse"
+    tex_image_node.image = img
+    # The addressing math nodes upstream (per material) pre-wrap U/V into [0, 1], so this is just
+    # a safe fallback for floating point edge cases right at the boundary.
+    tex_image_node.extension = "EXTEND"
+
+    group_input.location = (-300, 0)
+    tex_image_node.location = (0, 0)
+    group_output.location = (300, 0)
+
+    _ = group.links.new(group_input.outputs["Vector"], tex_image_node.inputs["Vector"])
+    _ = group.links.new(tex_image_node.outputs["Color"], group_output.inputs["Color"])
+    _ = group.links.new(tex_image_node.outputs["Alpha"], group_output.inputs["Alpha"])
+    return group
+
+
+# Relief-composite node names, shared between _wire_relief_composite (build/teardown) and
+# xvm.bake_texture_group (detects "has this group been customized" by checking whether the
+# group's Color output is still directly linked to PSO_Diffuse, or fed through nodes like these).
+_RELIEF_IMAGE_NODE_NAMES = ("PSO_Normal", "PSO_Metal", "PSO_Roughness")
+_RELIEF_NODE_PREFIX = "PSO_Relief_"
+
+
+def _wire_relief_composite(
+    group_tree: bpy.types.ShaderNodeTree,
+    diffuse_node: bpy.types.ShaderNodeTexImage,
+    normal_image: "bpy.types.Image | None",
+    metal_image: "bpy.types.Image | None",
+    roughness_image: "bpy.types.Image | None" = None,
+) -> None:
+    """(Re)builds the shared texture group's internal Color pipeline to optionally composite a
+    normal map's relief and/or a metal map's low-diffuse-response cue directly into the diffuse
+    color - live, using only Math/Mix/Map Range nodes (no BSDF, no light), so it's visible in the
+    viewport under any shading mode without depending on scene lighting, and so export (see
+    xvm.bake_texture_group) can reproduce exactly the same result by baking this group's actual
+    output instead of needing a separately-maintained formula.
+
+    roughness_image, if present, modulates the *normal* relief factor only (not metal's, a
+    different physical property): rough/matte areas show the full relief darkening, smooth areas
+    are pulled back toward neutral (no darkening) - a fake "occlusion" cue makes little sense on a
+    mirror-smooth surface. Has no effect if normal_image is None (nothing to modulate).
+
+    Always tears down and rebuilds from scratch (removing any node from a previous call, found by
+    name) rather than trying to patch existing wiring incrementally - simpler, and avoids leftover
+    nodes from an earlier state (e.g. metal removed but normal kept) accidentally staying wired in.
+
+    normal_image=None, metal_image=None restores the group's original default wiring (diffuse
+    node's Color/Alpha linked directly to the group's outputs) - this is also what every "Send to
+    ImgGroup" operator calls when sending a plain image, so a previously-wired composite is
+    correctly torn down rather than left stale.
+    """
+    for name in _RELIEF_IMAGE_NODE_NAMES:
+        node = group_tree.nodes.get(name)
+        if node is not None:
+            group_tree.nodes.remove(node)
+    for node in list(group_tree.nodes):
+        if node.name.startswith(_RELIEF_NODE_PREFIX):
+            group_tree.nodes.remove(node)
+
+    group_input = next(n for n in group_tree.nodes if n.type == "GROUP_INPUT")
+    group_output = next(n for n in group_tree.nodes if n.type == "GROUP_OUTPUT")
+
+    # Alpha always passes straight through from the diffuse node - the relief composite only ever
+    # affects color.
+    for link in list(group_output.inputs["Alpha"].links):
+        group_tree.links.remove(link)
+    _ = group_tree.links.new(diffuse_node.outputs["Alpha"], group_output.inputs["Alpha"])
+
+    for link in list(group_output.inputs["Color"].links):
+        group_tree.links.remove(link)
+
+    if normal_image is None and metal_image is None:
+        _ = group_tree.links.new(diffuse_node.outputs["Color"], group_output.inputs["Color"])
+        group_output.location = (300, 0)  # back to its original spot next to PSO_Diffuse
+        return
+
+    # xvm._RELIEF_MIN_DARKEN / _METAL_MAX_DARKEN define the strengths once, in Python, and get read
+    # into these nodes' default values here - the numbers stay in one place even though the
+    # formula itself is expressed twice (once as nodes for the live viewport, once implicitly via
+    # baking this same graph for export - see xvm.bake_texture_group).
+    factor_socket: bpy.types.NodeSocket | None = None
+
+    if normal_image is not None:
+        normal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        normal_tex.name = "PSO_Normal"
+        normal_tex.image = normal_image
+        normal_tex.location = (0, -300)
+        _ = group_tree.links.new(group_input.outputs["Vector"], normal_tex.inputs["Vector"])
+
+        separate_normal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+        separate_normal.name = _RELIEF_NODE_PREFIX + "SeparateNormal"
+        separate_normal.location = (250, -300)
+        _ = group_tree.links.new(normal_tex.outputs["Color"], separate_normal.inputs["Color"])
+
+        # Normal maps store tangent-space direction with components 0-1 mapping to -1..1 (standard
+        # OpenGL convention) - so stored Blue (Z) of 0.5 decodes to 0 (fully tilted away from
+        # straight up) and 1.0 decodes to 1 (straight up, untilted). A single clamped Map Range
+        # from [0.5, 1.0] to [_RELIEF_MIN_DARKEN, 1.0] does the decode+clamp+remap in one step:
+        # straight-up areas (Blue=1.0) are untouched, fully-tilted areas (Blue<=0.5) are darkened
+        # to _RELIEF_MIN_DARKEN - the more a pixel's normal leans away from straight up, the more
+        # it's darkened, approximating how a crease or bump catches/loses ambient light regardless
+        # of which way any particular light happens to be pointed.
+        remap_normal = cast(bpy.types.ShaderNodeMapRange, group_tree.nodes.new(type="ShaderNodeMapRange"))
+        remap_normal.name = _RELIEF_NODE_PREFIX + "MapRangeNormal"
+        remap_normal.location = (500, -300)
+        remap_normal.clamp = True
+        remap_normal.inputs[1].default_value = 0.5  # From Min
+        remap_normal.inputs[2].default_value = 1.0  # From Max
+        remap_normal.inputs[3].default_value = xvm._RELIEF_MIN_DARKEN  # To Min  # pyright: ignore[reportPrivateUsage]
+        remap_normal.inputs[4].default_value = 1.0  # To Max
+        _ = group_tree.links.new(separate_normal.outputs["Blue"], remap_normal.inputs[0])  # Value
+        factor_socket = remap_normal.outputs["Result"]
+
+        if roughness_image is not None:
+            roughness_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+            roughness_tex.name = "PSO_Roughness"
+            roughness_tex.image = roughness_image
+            roughness_tex.location = (0, -900)
+            _ = group_tree.links.new(group_input.outputs["Vector"], roughness_tex.inputs["Vector"])
+
+            separate_roughness = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+            separate_roughness.name = _RELIEF_NODE_PREFIX + "SeparateRoughness"
+            separate_roughness.location = (250, -900)
+            _ = group_tree.links.new(roughness_tex.outputs["Color"], separate_roughness.inputs["Color"])
+
+            # lerp(1.0, normal_factor, roughness): at roughness=0 (smooth) the result is 1.0 - no
+            # darkening at all; at roughness=1 (matte) it's the normal factor unmodified, same as
+            # when there's no roughness map; values in between scale proportionally.
+            modulate = cast(bpy.types.ShaderNodeMix, group_tree.nodes.new(type="ShaderNodeMix"))
+            modulate.name = _RELIEF_NODE_PREFIX + "ModulateByRoughness"
+            modulate.location = (750, -300)
+            modulate.data_type = "FLOAT"
+            _ = group_tree.links.new(separate_roughness.outputs["Red"], modulate.inputs[0])  # Factor
+            modulate.inputs[2].default_value = 1.0  # A - neutral/no-effect
+            _ = group_tree.links.new(factor_socket, modulate.inputs[3])  # B - the raw normal factor
+            factor_socket = modulate.outputs[0]  # Result
+
+    if metal_image is not None:
+        metal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        metal_tex.name = "PSO_Metal"
+        metal_tex.image = metal_image
+        metal_tex.location = (0, -600)
+        _ = group_tree.links.new(group_input.outputs["Vector"], metal_tex.inputs["Vector"])
+
+        separate_metal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+        separate_metal.name = _RELIEF_NODE_PREFIX + "SeparateMetal"
+        separate_metal.location = (250, -600)
+        _ = group_tree.links.new(metal_tex.outputs["Color"], separate_metal.inputs["Color"])
+
+        # Metal value of 0 (dielectric) leaves diffuse untouched; 1 (fully metal) darkens toward
+        # _METAL_MAX_DARKEN, approximating a metal's low diffuse response.
+        remap_metal = cast(bpy.types.ShaderNodeMapRange, group_tree.nodes.new(type="ShaderNodeMapRange"))
+        remap_metal.name = _RELIEF_NODE_PREFIX + "MapRangeMetal"
+        remap_metal.location = (500, -600)
+        remap_metal.clamp = True
+        remap_metal.inputs[1].default_value = 0.0  # From Min
+        remap_metal.inputs[2].default_value = 1.0  # From Max
+        remap_metal.inputs[3].default_value = 1.0  # To Min
+        remap_metal.inputs[4].default_value = xvm._METAL_MAX_DARKEN  # To Max  # pyright: ignore[reportPrivateUsage]
+        _ = group_tree.links.new(separate_metal.outputs["Red"], remap_metal.inputs[0])  # Value
+
+        if factor_socket is not None:
+            multiply = group_tree.nodes.new(type="ShaderNodeMath")
+            multiply.name = _RELIEF_NODE_PREFIX + "Multiply"
+            multiply.location = (1000, -450)
+            multiply.operation = "MULTIPLY"
+            _ = group_tree.links.new(factor_socket, multiply.inputs[0])
+            _ = group_tree.links.new(remap_metal.outputs["Result"], multiply.inputs[1])
+            factor_socket = multiply.outputs["Value"]
+        else:
+            factor_socket = remap_metal.outputs["Result"]
+
+    assert factor_socket is not None
+
+    # Duplicate the scalar darkening factor across R/G/B so it can multiply the diffuse color
+    # (Mix's Multiply blend mode needs an RGB "B" input, not a scalar).
+    combine = group_tree.nodes.new(type="ShaderNodeCombineColor")
+    combine.name = _RELIEF_NODE_PREFIX + "Combine"
+    combine.location = (1250, -300)
+    _ = group_tree.links.new(factor_socket, combine.inputs["Red"])
+    _ = group_tree.links.new(factor_socket, combine.inputs["Green"])
+    _ = group_tree.links.new(factor_socket, combine.inputs["Blue"])
+
+    mix = cast(bpy.types.ShaderNodeMix, group_tree.nodes.new(type="ShaderNodeMix"))
+    mix.name = _RELIEF_NODE_PREFIX + "Mix"
+    mix.location = (1500, 0)
+    mix.data_type = "RGBA"
+    mix.blend_type = "MULTIPLY"
+    mix.inputs[0].default_value = 1.0  # Factor
+    _ = group_tree.links.new(diffuse_node.outputs["Color"], mix.inputs[6])  # A (RGBA)
+    _ = group_tree.links.new(combine.outputs["Color"], mix.inputs[7])  # B (RGBA)
+    _ = group_tree.links.new(mix.outputs[2], group_output.inputs["Color"])  # Result (RGBA)
+    group_output.location = (1800, 0)  # pushed clear of the composite chain so nothing overlaps
+
+
+def get_or_create_mapping_node_group(xvm_filename: str, tex_id: int) -> bpy.types.ShaderNodeTree:
+    """A tiny node group wrapping just this texture's Mapping node, shared by every material
+    variant of this texture (see get_or_create_texture_node_group) so there's exactly one
+    Location/Rotation/Scale transform per original texture - matching that there's exactly one
+    physical texture to bake it into at export (see bake_material_mapping in xvm.py). Without
+    this, each variant would have its own independent Mapping node and editing only one of them
+    (the normal case - a user has no reason to know a texture has several variants) would be
+    ambiguous or silently ignored at export time. Edit the Mapping by entering this group (same
+    workflow as swapping the shared Image).
+    """
+    group_name = "MappingGroup_{}_{}".format(xvm_filename, tex_id)
+    existing = bpy.data.node_groups.get(group_name)
+    if existing is not None:
+        return cast(bpy.types.ShaderNodeTree, existing)
+
+    group = cast(bpy.types.ShaderNodeTree, bpy.data.node_groups.new(group_name, "ShaderNodeTree"))
+    group.interface.new_socket(name="Vector", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket(name="Vector", in_out="OUTPUT", socket_type="NodeSocketVector")
+
+    group_input = group.nodes.new(type="NodeGroupInput")
+    group_output = group.nodes.new(type="NodeGroupOutput")
+    mapping_node = cast(bpy.types.ShaderNodeMapping, group.nodes.new(type="ShaderNodeMapping"))
+
+    group_input.location = (-300, 0)
+    mapping_node.location = (0, 0)
+    group_output.location = (300, 0)
+
+    _ = group.links.new(group_input.outputs["Vector"], mapping_node.inputs["Vector"])
+    _ = group.links.new(mapping_node.outputs["Vector"], group_output.inputs["Vector"])
+    return group
+
+
 def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None) -> Material:
     # First pass: parse settings to find tex_id (needed for material deduplication and naming)
     tex_id = None
@@ -858,7 +1132,9 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     xj_settings = cast(MaterialWithXjSettings, mat).xj_settings
     xj_settings.lighting = False
     if tex_id is not None and xj_xvm is not None:
-        xj_settings.generate_mipmaps = bool(xvr.flags & xvm.XvrFlags.MIPMAPS)
+        # generate_mipmaps is NOT set here - it's a property of the shared texture (see
+        # get_or_create_texture_node_group), stamped once when that group is actually created,
+        # further down once the node tree - and thus a place to share it - exists.
         xj_settings.pso_id = xvr.id
         xj_settings.source_xvm_path = xj_xvm.get_full_path()
     for setting in material_settings:
@@ -913,9 +1189,14 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     mix_node.blend_type = "MULTIPLY"
     cast(bpy.types.NodeSocketFloat, mix_node.inputs[0]).default_value = 1.0
 
-    # Texture Coordinate and Mapping nodes for clean UV input chain
+    # Texture Coordinate and Mapping nodes for clean UV input chain. mapping_node ends up being
+    # either a plain ShaderNodeMapping (no texture - see img is None below, nothing to key a
+    # shared group on) or a ShaderNodeGroup wrapping one shared Mapping node per texture (see
+    # get_or_create_mapping_node_group) - both expose "Vector" input/output sockets, which is all
+    # the wiring below ever needs, so the rest of this function doesn't need to care which one it
+    # got.
     tex_coord_node = cast(bpy.types.ShaderNodeTexCoord, mat.node_tree.nodes.new(type="ShaderNodeTexCoord"))
-    mapping_node = cast(bpy.types.ShaderNodeMapping, mat.node_tree.nodes.new(type="ShaderNodeMapping"))
+    mapping_node: bpy.types.ShaderNodeMapping | bpy.types.ShaderNodeGroup
 
     # Blender's image texture node only has a single "Extension" setting shared by both U and V,
     # but PSO materials frequently use a different addressing mode per axis (e.g. wrap on U,
@@ -926,46 +1207,96 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     addr_u_node: bpy.types.ShaderNodeMath | None = None
     addr_v_node: bpy.types.ShaderNodeMath | None = None
 
+    # A second, identical addressing chain placed BEFORE the Mapping node, folding the mesh's
+    # raw UV into a single [0, 1) tile before any Mapping deformation is applied. This mirrors
+    # what the game itself does (it has no Mapping node - it just repeats one texture tile
+    # identically forever) and what xvm.py's export-time bake_material_mapping() already assumes
+    # (it only ever evaluates the transform over a single tile). Without this, editing the
+    # Mapping node here would preview a smooth deformation that slides differently on every
+    # repeat of a tiled surface - a look no exported texture could ever reproduce in-game, since
+    # the game always repeats the exact same texture unchanged. With it, what's previewed here
+    # matches what a texture-only export is actually capable of producing.
+    pre_separate_uv_node: bpy.types.ShaderNodeSeparateXYZ | None = None
+    pre_combine_uv_node: bpy.types.ShaderNodeCombineXYZ | None = None
+    pre_addr_u_node: bpy.types.ShaderNodeMath | None = None
+    pre_addr_v_node: bpy.types.ShaderNodeMath | None = None
+
     if img is None:
         tex_node = None
+        mapping_node = cast(bpy.types.ShaderNodeMapping, mat.node_tree.nodes.new(type="ShaderNodeMapping"))
     else:
-        tex_node = cast(bpy.types.ShaderNodeTexImage, mat.node_tree.nodes.new(type="ShaderNodeTexImage"))
-        tex_node.image = img
-        # The math nodes below pre-wrap U/V into [0, 1], so the image node's own extension is
-        # just a safe fallback for floating point edge cases right at the boundary.
-        tex_node.extension = "EXTEND"
+        # A Group node referencing a texture-specific shared node group (see
+        # get_or_create_texture_node_group), instead of a plain Image Texture node inline here -
+        # every material variant of this same texture shares the same group, so there's only
+        # ever one place to swap the image when replacing a texture.
+        assert tex_id is not None and xj_xvm is not None
+        tex_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
+        tex_node.node_tree = get_or_create_texture_node_group(
+            xj_xvm.get_filename(), tex_id, img, bool(xvr.flags & xvm.XvrFlags.MIPMAPS))
 
+        mapping_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
+        mapping_node.node_tree = get_or_create_mapping_node_group(xj_xvm.get_filename(), tex_id)
+
+        # Post-Mapping fold: brings a coordinate the Mapping transform pushed outside [0, 1) back
+        # to a valid position to read from the base image - a property of the image itself (does
+        # it tile seamlessly?), not of this variant's own texture addressing, so this always
+        # wraps regardless of xj_settings.tex_addr_u/v (see bake_material_mapping in xvm.py,
+        # which the export side mirrors exactly the same way).
         separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
         combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
-        addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
-        addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
+        addr_u_node = make_texture_addressing_node(mat.node_tree, TextureAddressingMode.D3DTADDRESS_WRAP.name)
+        addr_v_node = make_texture_addressing_node(mat.node_tree, TextureAddressingMode.D3DTADDRESS_WRAP.name)
+
+        pre_separate_uv_node = cast(bpy.types.ShaderNodeSeparateXYZ, mat.node_tree.nodes.new(type="ShaderNodeSeparateXYZ"))
+        pre_combine_uv_node = cast(bpy.types.ShaderNodeCombineXYZ, mat.node_tree.nodes.new(type="ShaderNodeCombineXYZ"))
+        pre_addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
+        pre_addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
 
     # Organize nodes horizontally from left to right with ~300px spacing
     # Texture chain (top row, Y = 300)
     tex_coord_node.location = (-1500, 300)
-    mapping_node.location = (-1200, 300)
-    if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
-        separate_uv_node.location = (-900, 300)
-        addr_u_node.location = (-600, 400)
-        addr_v_node.location = (-600, 200)
-        combine_uv_node.location = (-300, 300)
+    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
+        pre_separate_uv_node.location = (-1200, 300)
+        pre_addr_u_node.location = (-900, 400)
+        pre_addr_v_node.location = (-900, 200)
+        pre_combine_uv_node.location = (-600, 300)
+    # The Mapping group and the Image group are the two nodes someone actually needs to Tab into
+    # to edit a texture (transform or swap the image) - placed right next to each other so both
+    # are one click away, with the per-variant post-fold addressing chain (not something you'd
+    # normally need to open) tucked underneath instead of visually sitting between them.
+    mapping_node.location = (-300, 300)
     if tex_node is not None:
         tex_node.location = (0, 300)
+    if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
+        separate_uv_node.location = (-300, 0)
+        addr_u_node.location = (-150, 100)
+        addr_v_node.location = (-150, -100)
+        combine_uv_node.location = (0, 0)
     # Vertex color chain (bottom row, Y = -100)
-    vcol_node.location = (0, -100)
-    # Mix and alpha modulate (middle column, X = 300)
-    mix_node.location = (300, 100)
-    alpha_modulate_node.location = (300, -200)
-    # BSDF and transparency (X = 600)
-    bsdf_node.location = (600, 100)
-    transparency_node.location = (600, -200)
-    # Shader mix (X = 900)
-    shader_mix_node.location = (900, 0)
-    # Output (X = 1200)
-    output_node.location = (1200, 0)
+    vcol_node.location = (900, -100)
+    # Mix and alpha modulate (middle column, X = 1200)
+    mix_node.location = (1200, 100)
+    alpha_modulate_node.location = (1200, -200)
+    # BSDF and transparency (X = 1500)
+    bsdf_node.location = (1500, 100)
+    transparency_node.location = (1500, -200)
+    # Shader mix (X = 1800)
+    shader_mix_node.location = (1800, 0)
+    # Output (X = 2100)
+    output_node.location = (2100, 0)
 
-    # Connect UV -> Mapping -> (per-axis wrap) -> Texture
-    _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], mapping_node.inputs["Vector"])
+    # Connect UV -> (per-axis wrap, native repeat) -> Mapping -> (per-axis wrap again, in case
+    # Mapping pushed the already-folded coordinate back out of [0, 1)) -> Texture
+    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
+        _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], pre_separate_uv_node.inputs["Vector"])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["X"], pre_addr_u_node.inputs[0])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["Y"], pre_addr_v_node.inputs[0])
+        _ = mat.node_tree.links.new(pre_addr_u_node.outputs[0], pre_combine_uv_node.inputs["X"])
+        _ = mat.node_tree.links.new(pre_addr_v_node.outputs[0], pre_combine_uv_node.inputs["Y"])
+        _ = mat.node_tree.links.new(pre_separate_uv_node.outputs["Z"], pre_combine_uv_node.inputs["Z"])
+        _ = mat.node_tree.links.new(pre_combine_uv_node.outputs["Vector"], mapping_node.inputs["Vector"])
+    else:
+        _ = mat.node_tree.links.new(tex_coord_node.outputs["UV"], mapping_node.inputs["Vector"])
     if tex_node is not None and separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
         _ = mat.node_tree.links.new(mapping_node.outputs["Vector"], separate_uv_node.inputs["Vector"])
         _ = mat.node_tree.links.new(separate_uv_node.outputs["X"], addr_u_node.inputs[0])
