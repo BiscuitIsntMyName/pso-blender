@@ -154,7 +154,12 @@ def find_diffuse_image(mat: bpy.types.Material) -> bpy.types.Image | None:
     that Image Texture node, so swapping the image only has to be done in one shared place - see
     get_or_create_texture_node_group in xj.py.
 
-    Assumes the first image node found (direct or inside a group) is the correct one.
+    Assumes the first image node found directly in the material is the correct one. Inside a
+    shared ImgGroup, prefers a node explicitly named "PSO_Diffuse" (see
+    get_or_create_texture_node_group) - needed because that group can also carry PSO_Normal/
+    PSO_Metal Image Texture nodes for a relief composite (see _wire_relief_composite in xj.py),
+    so "the only TEX_IMAGE node in the group" is no longer a safe assumption. Falls back to "first
+    TEX_IMAGE node found" for groups created before this naming existed.
     """
     if mat.node_tree is None:
         return None
@@ -167,11 +172,32 @@ def find_diffuse_image(mat: bpy.types.Material) -> bpy.types.Image | None:
             group_node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
             if group_node_tree is None:
                 continue
+            named_node = group_node_tree.nodes.get("PSO_Diffuse")
+            if named_node is not None and named_node.type == "TEX_IMAGE":
+                image = cast(bpy.types.ShaderNodeTexImage, named_node).image
+                if image is not None:
+                    return image
             for inner_node in group_node_tree.nodes:
                 if inner_node.type == "TEX_IMAGE":
                     image = cast(bpy.types.ShaderNodeTexImage, inner_node).image
                     if image is not None:
                         return image
+    return None
+
+
+def find_material_img_group_tree(mat: bpy.types.Material) -> bpy.types.ShaderNodeTree | None:
+    """The shared ImgGroup_* node tree this material's texture group node references, if any -
+    see get_or_create_texture_node_group in xj.py. Used everywhere something needs to read/write
+    state that's shared across every material variant of the same texture instead of stored
+    separately per material (generate_mipmaps, a relief composite's normal/metal nodes, ...)."""
+    if mat.node_tree is None:
+        return None
+    for node in mat.node_tree.nodes:
+        if node.type != "GROUP":
+            continue
+        node_tree = cast(bpy.types.ShaderNodeGroup, node).node_tree
+        if node_tree is not None and node_tree.name.startswith("ImgGroup_"):
+            return node_tree
     return None
 
 
@@ -228,6 +254,71 @@ def find_material_base_color_image(mat: bpy.types.Material) -> bpy.types.Image |
         cast(bpy.types.ShaderNodeTexImage, n).image for n in mat.node_tree.nodes
         if n.type == "TEX_IMAGE" and cast(bpy.types.ShaderNodeTexImage, n).image is not None]
     return pick_best(all_images)
+
+
+def find_material_normal_and_metal_images(mat: bpy.types.Material) -> tuple["bpy.types.Image | None", "bpy.types.Image | None"]:
+    """The Normal Map and Metallic images of an arbitrary, foreign PBR material (e.g. one dropped
+    in by an asset-browser addon like Poly Haven, or a Source-engine material imported via an addon
+    like SourceIO/Plumber) - companion to find_material_base_color_image above, same assumption of
+    "a normal Principled BSDF setup" with no dependency on which addon actually built the graph.
+
+    Normal: expects the Principled BSDF's Normal input to be linked to a Normal Map node, whose
+    Color input is in turn linked to an Image Texture - this is the standard way every PBR-material
+    addon wires a normal map, not something specific to any one of them.
+
+    Metallic: expects the Principled BSDF's Metallic input to be linked directly to an Image
+    Texture. Deliberately does not attempt to detect or unpack a combined ARM
+    (AO/Roughness/Metalness) texture some asset sets use instead of a dedicated Metallic map - that
+    would need channel-splitting logic this doesn't have yet.
+
+    Either or both can come back None if not present/not found - the caller is expected to handle
+    missing normal, missing metal, or both, independently.
+    """
+    if mat.node_tree is None:
+        return (None, None)
+
+    principled_node = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if principled_node is None:
+        return (None, None)
+    principled = cast(bpy.types.ShaderNodeBsdfPrincipled, principled_node)
+
+    normal_image: bpy.types.Image | None = None
+    normal_input = principled.inputs.get("Normal")
+    if normal_input is not None and normal_input.is_linked:
+        normal_map_node = normal_input.links[0].from_node
+        if normal_map_node.type == "NORMAL_MAP":
+            color_input = cast(bpy.types.ShaderNodeNormalMap, normal_map_node).inputs.get("Color")
+            if color_input is not None and color_input.is_linked:
+                tex_node = color_input.links[0].from_node
+                if tex_node.type == "TEX_IMAGE":
+                    normal_image = cast(bpy.types.ShaderNodeTexImage, tex_node).image
+
+    metal_image: bpy.types.Image | None = None
+    metallic_input = principled.inputs.get("Metallic")
+    if metallic_input is not None and metallic_input.is_linked:
+        tex_node = metallic_input.links[0].from_node
+        if tex_node.type == "TEX_IMAGE":
+            metal_image = cast(bpy.types.ShaderNodeTexImage, tex_node).image
+
+    return (normal_image, metal_image)
+
+
+def find_material_roughness_image(mat: bpy.types.Material) -> "bpy.types.Image | None":
+    """The Roughness image of an arbitrary, foreign PBR material, if any - same graph-walking
+    pattern as find_material_normal_and_metal_images (kept separate rather than folded in there,
+    same precedent as metal being additive to normal): expects the Principled BSDF's Roughness
+    input to be linked directly to an Image Texture, same shape as the Metallic case."""
+    if mat.node_tree is None:
+        return None
+    principled_node = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+    if principled_node is None:
+        return None
+    roughness_input = cast(bpy.types.ShaderNodeBsdfPrincipled, principled_node).inputs.get("Roughness")
+    if roughness_input is not None and roughness_input.is_linked:
+        tex_node = roughness_input.links[0].from_node
+        if tex_node.type == "TEX_IMAGE":
+            return cast(bpy.types.ShaderNodeTexImage, tex_node).image
+    return None
 
 
 @cache # This is a surprisingly slow operation so let's use a cache
