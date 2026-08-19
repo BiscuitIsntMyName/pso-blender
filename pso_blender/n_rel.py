@@ -1,4 +1,4 @@
-import math, os, re
+import math, os, re, shutil
 from collections.abc import Generator
 from typing import Any, Literal, cast, final
 from mathutils import Vector
@@ -523,6 +523,14 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
     result["collection"] = collection
     world_scale = util.get_pso_world_scale()
     tam_entries: dict[int, tam.TamEntry] = tam.read(tam_path) if tam_path and os.path.isfile(tam_path) else {}
+    if tam_entries and nrel_xvm is not None:
+        # Every fresh import rebuilds this map's animated-texture cache from scratch instead of
+        # reusing whatever a previous run left behind - matches the addon's actual real-world
+        # testing workflow (reinstall -> restart Blender -> reimport, never saving), and avoids
+        # ever silently serving stale frame content from an earlier version of this same .tam/.xvm.
+        # Scoped to just this map's own cache subfolder (see animated_texture_cache_root in
+        # xj.py) - other maps' cached frames are left untouched.
+        shutil.rmtree(xj.animated_texture_cache_root(nrel_xvm.get_filename()), ignore_errors=True)
     yield  # Header parsed, result["total"] is now valid - no per-tree work has happened yet.
 
     for chunk in chunks:

@@ -1094,7 +1094,12 @@ def _write_frame_png(pixels: "list[float]", width: int, height: int, path: str):
     real numbered file on disk - the exact on-disk shape get_image_sequence_images (xvm.py) later
     re-discovers at export time. Goes through a throwaway Image datablock since Image.save() is
     the only piece of this addon that already knows how to encode decoded pixels to a file."""
-    tmp_img = bpy.data.images.new("__pso_blender_tam_frame_tmp", width=width, height=height)
+    # alpha=True: bpy.data.images.new() defaults to alpha=False (no alpha channel at all), which
+    # made every frame PNG save out fully opaque regardless of the source pixels' real alpha -
+    # confirmed on real map_acity data (a genuine 0.0/1.0 punch-through mask decoded from the
+    # original texture came back as a uniform 1.0 after the import round-trip, and the re-export
+    # correspondingly dropped XvrFlags.ALPHA entirely).
+    tmp_img = bpy.data.images.new("__pso_blender_tam_frame_tmp", width=width, height=height, alpha=True)
     try:
         tmp_img.pixels = pixels  # pyright: ignore[reportAttributeAccessIssue]
         tmp_img.filepath_raw = path
@@ -1102,6 +1107,17 @@ def _write_frame_png(pixels: "list[float]", width: int, height: int, path: str):
         tmp_img.save()
     finally:
         bpy.data.images.remove(tmp_img)
+
+
+def animated_texture_cache_root(xvm_filename: str) -> str:
+    """Where cached animated-texture frame PNGs for one .xvm live - Blender's standard per-user
+    data directory, not next to the source .xvm. That used to be the game's own (often read-only,
+    always shared) install folder, which repeatedly collided with concurrent test/import runs
+    against the same real data. bpy.app.tempdir is wiped every Blender restart, which would break
+    any Image Sequence a *saved* .blend still references - user_resource is the one place that's
+    both writable and persists across restarts without polluting the game folder."""
+    base = bpy.utils.user_resource("DATAFILES", path="pso_blender_cache", create=True)
+    return os.path.join(base, xvm_filename)
 
 
 def get_or_build_animated_texture_image(xj_xvm: xvm.Xvm, tam_entry: "tam.TamEntry", base_xvr: xvm.Xvr, tex_id: int) -> bpy.types.Image:
@@ -1127,7 +1143,7 @@ def get_or_build_animated_texture_image(xj_xvm: xvm.Xvm, tam_entry: "tam.TamEntr
     # in the same directory would silently merge into one bogus sequence - and animation_id
     # numbering isn't guaranteed unique across a shared .xvm's several segment .tam files.
     seq_dir_name = "tam_anim_{}_{}".format(tam_entry.animation_id, content_key)
-    cache_root = os.path.join(os.path.dirname(xj_xvm.get_full_path()), "pso-blender-cache", seq_dir_name)
+    cache_root = os.path.join(animated_texture_cache_root(xj_xvm.get_filename()), seq_dir_name)
     first_frame_path = os.path.join(cache_root, "0.png")
     try:
         os.makedirs(cache_root, exist_ok=True)
