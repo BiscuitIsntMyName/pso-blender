@@ -31,7 +31,10 @@ def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
         if os.path.isfile(os.path.join(dirname, item)):
             frame_names.append(item)
     return [
-        bpy.data.images.load(os.path.join(dirname, name))
+        # check_existing: re-running export against the same sequence directory (e.g. repeated
+        # test exports) reuses the datablocks already loaded instead of piling up fresh duplicates
+        # every time.
+        bpy.data.images.load(os.path.join(dirname, name), check_existing=True)
         # Sort filenames in numeric order
         for name in sorted(frame_names, key=lambda key: int(os.path.basename(os.path.splitext(key)[0])))]
 
@@ -139,12 +142,22 @@ class TextureManager:
     _base_id: int
     _textures_by_name: dict[str, Texture]
     _has_anim_tex: bool = False
+    # Tracked by name, not by Image reference: the same animated texture is shared by many
+    # objects, so this list can and does accumulate the same frame more than once (each already
+    # deduplicated to one datablock via check_existing) - removing by name lets a second, stale
+    # occurrence be a harmless no-op lookup instead of touching an already-freed struct.
+    _ephemeral_frame_images: list[str]
 
     def __init__(self, objects: list[bpy.types.Object]):
         # Create "unique" texture IDs
         self._base_id = int(time.time()) & 0xffffffff
         id_counter = self._base_id
         self._textures_by_name = dict()
+        # Frame images loaded below purely to read their pixels into the exported .xvm - not
+        # referenced by any material/node, so nothing else keeps them alive once export is done.
+        # Tracked here so cleanup_ephemeral_images() can remove them afterward instead of leaving
+        # them to accumulate in bpy.data.images across repeated exports.
+        self._ephemeral_frame_images = []
 
         get_object_diffuse_textures.cache_clear()
 
@@ -159,14 +172,40 @@ class TextureManager:
                     frames = get_image_sequence_images(tex.image)
                     tex.animation_frames = len(frames)
                     all_textures.append(tex)
-                    for frame in frames:
+                    for i, frame in enumerate(frames):
+                        # check_existing (see get_image_sequence_images) means frame 0 resolves to
+                        # the exact same datablock as tex.image itself (loaded from the identical
+                        # file path at import time) - that one is already correctly named and is a
+                        # real, in-use image, not an export-only throwaway, so leave it alone.
+                        if frame != tex.image:
+                            frame.name = "{}_frame{}".format(tex.image.name, i)
+                            self._ephemeral_frame_images.append(frame.name)
+                            # Same original-order sort key as the base/frame-0 image (which
+                            # already carries this, stamped at import - see make_material and
+                            # get_or_build_animated_texture_image in xj.py) - a frame image has no
+                            # tex_id of its own, but should still sort adjacent to its animation's
+                            # other frames instead of falling back to alphabetical.
+                            orig_tex_id = tex.image.get("pso_orig_tex_id")
+                            if orig_tex_id is not None:
+                                frame["pso_orig_tex_id"] = orig_tex_id
                         all_textures.append(
                             Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
                 else:
                     all_textures.append(tex)
         
-        # Sort textures by material name
-        all_textures.sort(key=lambda x: x.material_name)
+        # Sort textures close to their original relative position in the source .xvm (tracked via
+        # pso_orig_tex_id, stashed on import - see make_material/get_or_build_animated_texture_
+        # image in xj.py) instead of purely alphabetically by material name, which restructured
+        # every texture's position on every single export regardless of whether anything was
+        # actually edited. Textures with no original id (freshly authored, never imported) sort
+        # after every originally-ordered one, by material name as before - the previous behavior,
+        # unchanged for that case.
+        def texture_sort_key(tex: Texture) -> tuple[int, int, str]:
+            orig_id = tex.image.get("pso_orig_tex_id")
+            if orig_id is None:
+                return (1, 0, tex.material_name)
+            return (0, int(orig_id), tex.material_name)
+        all_textures.sort(key=texture_sort_key)
 
         # Try deduplicate textures
         for tex in all_textures:
@@ -182,11 +221,25 @@ class TextureManager:
                     id_counter += 1
 
     def get_object_textures(self, obj: bpy.types.Object) -> list[Texture]:
+        # Multiple material variants (different blend mode/addressing) of the same physical
+        # texture can share one underlying image, deduplicated by image name in __init__ - only
+        # the FIRST material encountered for a given image gets registered into
+        # _textures_by_name, and its .material_name reflects that first material only. Returning
+        # that shared instance as-is here would silently carry the wrong .material_name for every
+        # other object/material using the same image - write_index_buffers matches strips to
+        # textures by material name, so a wrong .material_name there causes a strip's texture
+        # lookup to fail (dropped texture) or, if the wrong name happens to also collide with a
+        # different real material on this same object, latch onto that unrelated texture instead.
+        # get_object_diffuse_textures(obj) already builds a fresh Texture per this object's own
+        # material slots with the correct .material_name - only .id needs to come from the
+        # deduplicated/canonical entry (the actual shared texture id every variant must agree on).
         textures: list[Texture] = []
         all_textures = get_object_diffuse_textures(obj)
         for tex in all_textures:
-            if tex.name in self._textures_by_name:
-                textures.append(self._textures_by_name[tex.name])
+            canonical = self._textures_by_name.get(tex.name)
+            if canonical is not None:
+                tex.id = canonical.id
+                textures.append(tex)
         return textures
     
     def get_all_textures(self) -> list[Texture]:
@@ -209,6 +262,19 @@ class TextureManager:
             if tex.image.source == "SEQUENCE":
                 return tex
         return None
+
+    def cleanup_ephemeral_images(self):
+        """Removes the per-frame images loaded solely to read animated textures' pixel data into
+        the exported .xvm (see __init__) - they're not referenced by any material/node, so nothing
+        else keeps them alive, and leaving them in bpy.data.images just accumulates orphaned
+        datablocks across repeated exports. The users == 0 check is what makes this safe even if a
+        frame happens to double as a real, in-use image somewhere else (e.g. shared with another
+        animation) - only genuinely unreferenced images are removed."""
+        for name in self._ephemeral_frame_images:
+            img = bpy.data.images.get(name)
+            if img is not None and img.users == 0:
+                bpy.data.images.remove(img)
+        self._ephemeral_frame_images = []
 
 
 def texture_checksum(tex: Texture) -> str:

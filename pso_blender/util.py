@@ -1,6 +1,6 @@
 from collections.abc import Generator, Sequence
 from functools import cache
-import math
+import math, re
 from typing import Any, ClassVar, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
 import bpy.types
@@ -10,6 +10,24 @@ from .serialization import Serializable
 
 
 T = TypeVar("T", bound=int | float)
+
+
+_VARIANTLESS_MAP_NAME = re.compile("map_[a-z]+[0-9]{2}")
+
+
+def variantless_map_basename(filename_no_ext: str) -> str:
+    """Strips a multi-segment map's "_00"-style segment suffix (and any trailing r/n/c REL
+    variant letter already removed by the caller) down to the base name its .xvm is actually
+    shared under - e.g. "map_acity00_00" -> "map_acity00". Real Ephinea map data names a
+    multi-segment map's .rel/.tam siblings per-segment (map_acity00_00n.rel, map_acity00_00.tam)
+    but shares a single .xvm across every segment, named without the segment suffix
+    (map_acity00.xvm) - so the .xvm sibling path must be derived from this variantless form, not
+    from the same noext used to build the .rel/.tam siblings. A single-segment map (e.g.
+    "map_aforest01") has no segment suffix to strip, so this is a no-op for those and returns the
+    name unchanged.
+    """
+    match = _VARIANTLESS_MAP_NAME.match(filename_no_ext)
+    return match.group() if match else filename_no_ext
 
 
 class ModalStepOperator:

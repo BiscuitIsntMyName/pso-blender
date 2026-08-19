@@ -159,10 +159,19 @@ def read(bml_path: str, bml_xvm: xvm.Xvm | None) -> list[Collection]:
 
 
 def write(bml_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
-    root_objs_by_collection: dict[str, list[bpy.types.Object]] = dict()
     all_objs: list[bpy.types.Object] = root_objs.copy()
     for obj in root_objs:
         all_objs += obj.children_recursive
+    texture_man = xvm.TextureManager(all_objs)
+    try:
+        _write_impl(bml_path, xvm_path, root_objs, texture_man)
+    finally:
+        texture_man.cleanup_ephemeral_images()
+
+
+def _write_impl(bml_path: str, xvm_path: str, root_objs: list[bpy.types.Object], texture_man: xvm.TextureManager):
+    root_objs_by_collection: dict[str, list[bpy.types.Object]] = dict()
+    for obj in root_objs:
         coll = obj.users_collection[0]
         if coll.name not in root_objs_by_collection:
             root_objs_by_collection[coll.name] = []
@@ -170,7 +179,6 @@ def write(bml_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
 
     bml_buf = ResizableBuffer(size=0)
     files_buf = ResizableBuffer(size=0)
-    texture_man = xvm.TextureManager(all_objs)
 
     # Write BML header at the beginning of the file
     bml_header = BmlHeader(

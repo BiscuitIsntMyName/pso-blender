@@ -12,7 +12,7 @@ from .xj_material_properties_menu import MaterialWithXjSettings, TextureAddressi
 from .serialization import Serializable, Numeric, AlignedString, Ptr32
 from struct import pack_into
 from .njcm import MeshTreeNode, NinjaEvalFlag
-from . import tristrip, util, xvm
+from . import tristrip, util, xvm, tam
 from .iff import IffHeader, IffChunk, parse_pof0
 from .njtl import TextureList, TextureListEntry
 
@@ -490,12 +490,19 @@ def write_vertex_buffer(
         for (vert_idx, loop_idx) in zip(face.vertices, face.loops):
             # Gather all required and optional vertex attributes
             vertex_attributes = VertexAttributes(idx=vert_idx)
-            # Exclude translation from transform
+            # Exclude translation from transform. Use matrix_local (relative to the object's own
+            # parent, i.e. its chunk_root), not matrix_world - the chunk's own rotation
+            # (chunk_root.rotation_euler, set from the file's chunk.rot_x/y/z) is already applied
+            # separately via the parent/child scene-graph relationship on import and in-game, so
+            # baking it into the vertex data too double-applies it. Invisible for the vast
+            # majority of chunks (which have zero rotation, so matrix_local and matrix_world's
+            # rotation component coincide), but confirmed on real map_acity00_00 data: chunk 30
+            # (the reported "commerce district") has an genuine 180-degree chunk-level rotation,
+            # and every mesh in it was being doubly-rotated on export, corrupting its geometry.
             local_vert = blender_mesh.vertices[vert_idx]
-            world_vert = obj.matrix_world @ local_vert.co
             world_vert = local_vert.co.to_4d()
             world_vert.w = 0
-            world_vert = util.from_blender_axes((obj.matrix_world @ world_vert).to_3d())
+            world_vert = util.from_blender_axes((obj.matrix_local @ world_vert).to_3d())
             vertex_attributes.x = world_vert[0]
             vertex_attributes.y = world_vert[1]
             vertex_attributes.z = world_vert[2]
@@ -515,11 +522,18 @@ def write_vertex_buffer(
                         raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 else:
                     col = vertex_colors.data[vert_idx].color
-                # BGRA
-                # Need to clamp because light baking can cause values to go higher than normal
-                vertex_attributes.b = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
+                # VertexWithColor.get_color() (the read path) returns (self.r, self.g, self.b,
+                # self.a) with no channel reordering, so a pristine game-authored file's "r"
+                # field really does decode straight into Blender's red channel - the format is
+                # plain RGBA, not BGRA. This previously assigned col[0] (Blender's red) into the
+                # "b" field and col[2] (blue) into "r", a swap read never undid - harmless while
+                # only ever reading original files, but any mesh with real baked vertex-color
+                # lighting got its red/blue channels swapped on every export, visibly changing
+                # its overall tint. Need to clamp because light baking can cause values to go
+                # higher than normal.
+                vertex_attributes.r = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
                 vertex_attributes.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
-                vertex_attributes.r = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
+                vertex_attributes.b = int(util.clamp(col[2], 0.0, 1.0) * 0xff)
                 vertex_attributes.a = int(util.clamp(col[3], 0.0, 1.0) * 0xff)
             if use_normals:
                 # Vertex or face normal
@@ -530,7 +544,9 @@ def write_vertex_buffer(
                     normal = local_vert.normal
                 normal = normal.to_4d()
                 normal.w = 0
-                normal = util.from_blender_axes((obj.matrix_world @ normal).to_3d().normalized())
+                # Same matrix_local reasoning as the position transform above - the chunk's
+                # rotation must not be double-applied to normals either.
+                normal = util.from_blender_axes((obj.matrix_local @ normal).to_3d().normalized())
                 vertex_attributes.nx = normal[0]
                 vertex_attributes.ny = normal[1]
                 vertex_attributes.nz = normal[2]
@@ -799,7 +815,7 @@ def make_texture_addressing_node(node_tree: bpy.types.ShaderNodeTree, addr_mode:
     return math_node
 
 
-def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.types.Image, generate_mipmaps: bool) -> bpy.types.ShaderNodeTree:
+def get_or_create_texture_node_group(xvm_filename: str, tex_id: "int | str", img: bpy.types.Image, generate_mipmaps: bool, frame_count: "int | None" = None) -> bpy.types.ShaderNodeTree:
     """A tiny node group wrapping just this texture's Image Texture node, shared by every
     material variant of this texture (different blend mode / addressing settings, see
     make_material) so that swapping which image represents this texture - the whole point of a
@@ -838,6 +854,18 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: int, img: bpy.ty
     # The addressing math nodes upstream (per material) pre-wrap U/V into [0, 1], so this is just
     # a safe fallback for floating point edge cases right at the boundary.
     tex_image_node.extension = "EXTEND"
+    if frame_count is not None:
+        # A SEQUENCE-source image's ImageUser defaults to frame_duration=1 (only sequence-frame 1,
+        # the first file, is ever considered "in range") and use_auto_refresh=False - without this,
+        # frame 1 shows correctly but every other scene frame has no frame mapped to it at all
+        # (Blender's "missing image data" pink placeholder), and nothing ever advances anyway.
+        # frame_start=0 and frame_offset=-1 (not Blender's defaults of 1 and 0): confirmed by real
+        # in-Blender testing - at the scene's common resting playhead position (frame 0/1),
+        # nothing showed the real first frame until both were adjusted together.
+        tex_image_node.image_user.frame_start = 0
+        tex_image_node.image_user.frame_offset = -1
+        tex_image_node.image_user.frame_duration = frame_count
+        tex_image_node.image_user.use_auto_refresh = True
 
     group_input.location = (-300, 0)
     tex_image_node.location = (0, 0)
@@ -1028,7 +1056,7 @@ def _wire_relief_composite(
     group_output.location = (1800, 0)  # pushed clear of the composite chain so nothing overlaps
 
 
-def get_or_create_mapping_node_group(xvm_filename: str, tex_id: int) -> bpy.types.ShaderNodeTree:
+def get_or_create_mapping_node_group(xvm_filename: str, tex_id: "int | str") -> bpy.types.ShaderNodeTree:
     """A tiny node group wrapping just this texture's Mapping node, shared by every material
     variant of this texture (see get_or_create_texture_node_group) so there's exactly one
     Location/Rotation/Scale transform per original texture - matching that there's exactly one
@@ -1060,13 +1088,117 @@ def get_or_create_mapping_node_group(xvm_filename: str, tex_id: int) -> bpy.type
     return group
 
 
-def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None) -> Material:
+def _write_frame_png(pixels: "list[float]", width: int, height: int, path: str):
+    """Writes one already-decoded RGBA frame (xvm.read() fully decodes every Xvr's pixel data up
+    front, so xj_xvm.xvrs[i].data is ready to use directly - no separate decode step needed) to a
+    real numbered file on disk - the exact on-disk shape get_image_sequence_images (xvm.py) later
+    re-discovers at export time. Goes through a throwaway Image datablock since Image.save() is
+    the only piece of this addon that already knows how to encode decoded pixels to a file."""
+    tmp_img = bpy.data.images.new("__pso_blender_tam_frame_tmp", width=width, height=height)
+    try:
+        tmp_img.pixels = pixels  # pyright: ignore[reportAttributeAccessIssue]
+        tmp_img.filepath_raw = path
+        tmp_img.file_format = "PNG"
+        tmp_img.save()
+    finally:
+        bpy.data.images.remove(tmp_img)
+
+
+def get_or_build_animated_texture_image(xj_xvm: xvm.Xvm, tam_entry: "tam.TamEntry", base_xvr: xvm.Xvr, tex_id: int) -> bpy.types.Image:
+    """Reconstructs a real, on-disk numbered-file image sequence for one HAS_TEXTURE_ANIMATION
+    tree's animation, and returns it loaded with .source == "SEQUENCE" - the exact state
+    xvm.py's TextureManager (export side) already detects via tex.image.source == "SEQUENCE" and
+    re-serializes via get_image_sequence_images, with zero export-side changes needed.
+
+    Frames are written in tam_entry.frames order, NOT deduplicated by texture_index: a real .tam
+    can revisit an earlier frame's texture_index later (a ping-pong pattern - confirmed on real
+    map data, e.g. Ephinea's map_desert03 animation_id 24). Blender's Image Sequence has no
+    "replay frame N again" concept, so a repeated texture_index is written out as its own new
+    numbered file, physically duplicating that frame's pixel data.
+
+    Per-keyframe frame_delay IS preserved across a round-trip: it's stashed as a custom property
+    (see below) on the returned image and read back by tam.write(), since Blender's Image
+    datablock has no native per-frame timing slot of its own.
+    """
+    xvrs_by_index = xj_xvm.xvrs
+    content_key = hashlib.md5(str([kf.texture_index for kf in tam_entry.frames]).encode()).hexdigest()[:12]
+    # Namespaced by content hash, not just animation_id: get_image_sequence_images does an
+    # unfiltered directory listing sorted by numeric filename, so two animations' frames landing
+    # in the same directory would silently merge into one bogus sequence - and animation_id
+    # numbering isn't guaranteed unique across a shared .xvm's several segment .tam files.
+    seq_dir_name = "tam_anim_{}_{}".format(tam_entry.animation_id, content_key)
+    cache_root = os.path.join(os.path.dirname(xj_xvm.get_full_path()), "pso-blender-cache", seq_dir_name)
+    first_frame_path = os.path.join(cache_root, "0.png")
+    try:
+        os.makedirs(cache_root, exist_ok=True)
+        # Check every expected frame file, not just frame 0: a cache dir can be left with only
+        # SOME frames on disk (e.g. an earlier run that hit a mid-loop OSError, like a transient
+        # Windows file lock, and fell through to the static-fallback path below without finishing
+        # the write) - checking frame 0 alone would then wrongly treat that partial set as "already
+        # fully cached" forever, leaving every missing frame index showing as Blender's pink
+        # "missing image data" placeholder once ImageUser.frame_duration expects it to exist.
+        if not all(os.path.isfile(os.path.join(cache_root, "{}.png".format(i))) for i in range(len(tam_entry.frames))):
+            for i, keyframe in enumerate(tam_entry.frames):
+                xvr = xvrs_by_index[keyframe.texture_index]
+                _write_frame_png(xvr.data, xvr.width, xvr.height, os.path.join(cache_root, "{}.png".format(i)))
+    except OSError as ex:
+        # Import's source directory (e.g. an unpacked game-data folder) isn't guaranteed writable,
+        # unlike export's user-chosen destination - fall back to a static image for this texture
+        # rather than failing the whole import, matching this addon's existing convention for a
+        # missing/bad xvm_path/tam_path (warn and continue, never hard-block).
+        warn("XJ Warning: Could not write animated texture cache to '{}' ({}) - importing "
+             "animation_id {} as a static texture instead.".format(cache_root, ex, tam_entry.animation_id))
+        img = bpy.data.images.new("{}_xvr_{}_anim{}".format(xj_xvm.get_filename(), tex_id, tam_entry.animation_id),
+                                   width=base_xvr.width, height=base_xvr.height)
+        img["pso_orig_tex_id"] = tex_id
+        if len(base_xvr.data) > 0:
+            img.pixels = base_xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+        return img
+
+    img = bpy.data.images.load(first_frame_path, check_existing=True)
+    img.source = "SEQUENCE"
+    # Blender names a freshly-loaded sequence image after its first file ("0.png") by default -
+    # opaque and colliding across animations. Rename to match the static-texture naming convention
+    # ("{xvm}_xvr_{tex_id}") plus an animation suffix, so the node group, material, and image all
+    # point at the same identifiable texture instead of just the node group.
+    img.name = "{}_xvr_{}_anim{}".format(xj_xvm.get_filename(), tex_id, tam_entry.animation_id)
+    # Same reasoning as the static path in make_material - lets TextureManager (xvm.py) re-export
+    # this animation's frames close to their original relative position instead of an arbitrary
+    # alphabetical-by-material-name sort.
+    img["pso_orig_tex_id"] = tex_id
+    has_alpha = bool(base_xvr.flags & xvm.XvrFlags.ALPHA)
+    has_premul_alpha = base_xvr.format in (xvm.XvrFormat.DXT2, xvm.XvrFormat.DXT4)
+    img.alpha_mode = "NONE" if not has_alpha else ("PREMUL" if has_premul_alpha else "STRAIGHT")
+    # Blender's Image datablock has no native per-frame timing concept, so the real per-keyframe
+    # delay (game ticks between this frame and the next) has nowhere else to live - stash it as a
+    # custom property on the sequence's base image so tam.write() can read it back on export
+    # instead of assuming a uniform 1-tick delay for every frame.
+    img["pso_tam_frame_delays"] = [kf.frame_delay for kf in tam_entry.frames]
+    return img
+
+
+def make_material(name: str, material_settings: list[RenderStateArgs], node_id: int, material_id: int, xj_xvm: xvm.Xvm | None, tam_entry: "tam.TamEntry | None" = None) -> Material:
     # First pass: parse settings to find tex_id (needed for material deduplication and naming)
     tex_id = None
     for setting in material_settings:
         if setting.state_type == RenderStateType.TEXTURE_ID:
             tex_id = setting.arg1
             break
+
+    # Two different animations can legitimately share the same base tex_id (confirmed on real
+    # map_desert03 data: animation_id 1 and 2 both use tex_id 1, differing only in playback
+    # speed) - without folding animation_id into the dedup key below, the second animation's tree
+    # would silently reuse the first's already-created material/image, dropping its own frames
+    # entirely (material dedup only ever looked at tex_id + render state, with no way to tell two
+    # different animations sharing one tex_id apart).
+    is_animated_tex_id = (
+        tam_entry is not None and tex_id is not None
+        and tex_id in {kf.texture_index for kf in tam_entry.frames})
+    # Same reasoning applies to the shared texture/mapping node groups (get_or_create_texture_
+    # node_group/get_or_create_mapping_node_group below) - those are also keyed by tex_id alone,
+    # and would otherwise hand animation_id=2's material back animation_id=1's already-created
+    # group (and thus its image), discarding animation_id=2's own frames entirely.
+    group_key: "int | str" = "{}_anim{}".format(tex_id, tam_entry.animation_id) if is_animated_tex_id and tam_entry is not None else tex_id
 
     # Materials are keyed by texture + full render state (blend mode, texture addressing, etc,
     # everything except the texture id itself which is represented separately). The same texture
@@ -1088,6 +1220,9 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
             if s.state_type != RenderStateType.TEXTURE_ID)
         settings_hash = hashlib.md5(repr(settings_signature).encode()).hexdigest()[:8]
         mat_name = "Mat_{}_{}_{}".format(xj_xvm.get_filename(), tex_id, settings_hash)
+        if is_animated_tex_id:
+            assert tam_entry is not None
+            mat_name += "_anim{}".format(tam_entry.animation_id)
     else:
         mat_name = "{}_node_{}_mat_{}".format(name, node_id, material_id)
 
@@ -1100,26 +1235,38 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     img: bpy.types.Image | None = None
     if tex_id is not None and xj_xvm is not None:
         xvr = xj_xvm.xvrs[tex_id]
-        img_name = "{}_xvr_{}".format(xj_xvm.get_filename(), tex_id)
-        img_idx = bpy.data.images.find(img_name)
-        if img_idx == -1:
-            img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
-            assert img is not None
-            # Determine alpha mode
-            has_alpha = xvr.flags & xvm.XvrFlags.ALPHA
-            has_premul_alpha = xvr.format == xvm.XvrFormat.DXT2 or xvr.format == xvm.XvrFormat.DXT4
-            if not has_alpha:
-                img.alpha_mode = "NONE"
-            elif has_premul_alpha:
-                img.alpha_mode = "PREMUL"
-            else:
-                img.alpha_mode = "STRAIGHT"
+        # Build a real animated Image Sequence instead of a static single-frame image, so the
+        # existing export path (TextureManager detecting image.source=="SEQUENCE") picks it back
+        # up automatically on the next export.
+        if is_animated_tex_id:
+            assert tam_entry is not None
+            img = get_or_build_animated_texture_image(xj_xvm, tam_entry, xvr, tex_id)
         else:
-            img = bpy.data.images[img_idx]
-            assert img is not None
-        if len(xvr.data) > 0:
-            # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
-            img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+            img_name = "{}_xvr_{}".format(xj_xvm.get_filename(), tex_id)
+            img_idx = bpy.data.images.find(img_name)
+            if img_idx == -1:
+                img = bpy.data.images.new(img_name, width=xvr.width, height=xvr.height)
+                assert img is not None
+                # Stashed so TextureManager (xvm.py) can re-export textures close to their
+                # original relative order instead of an arbitrary alphabetical-by-material-name
+                # sort, which restructures every texture's position in the .xvm on every export
+                # even with zero edits made.
+                img["pso_orig_tex_id"] = tex_id
+                # Determine alpha mode
+                has_alpha = xvr.flags & xvm.XvrFlags.ALPHA
+                has_premul_alpha = xvr.format == xvm.XvrFormat.DXT2 or xvr.format == xvm.XvrFormat.DXT4
+                if not has_alpha:
+                    img.alpha_mode = "NONE"
+                elif has_premul_alpha:
+                    img.alpha_mode = "PREMUL"
+                else:
+                    img.alpha_mode = "STRAIGHT"
+            else:
+                img = bpy.data.images[img_idx]
+                assert img is not None
+            if len(xvr.data) > 0:
+                # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
+                img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
 
     # No existing material found, create a new one
     mat = bpy.data.materials.new(mat_name)
@@ -1232,10 +1379,11 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         assert tex_id is not None and xj_xvm is not None
         tex_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
         tex_node.node_tree = get_or_create_texture_node_group(
-            xj_xvm.get_filename(), tex_id, img, bool(xvr.flags & xvm.XvrFlags.MIPMAPS))
+            xj_xvm.get_filename(), group_key, img, bool(xvr.flags & xvm.XvrFlags.MIPMAPS),
+            frame_count=len(tam_entry.frames) if is_animated_tex_id and tam_entry is not None else None)
 
         mapping_node = cast(bpy.types.ShaderNodeGroup, mat.node_tree.nodes.new(type="ShaderNodeGroup"))
-        mapping_node.node_tree = get_or_create_mapping_node_group(xj_xvm.get_filename(), tex_id)
+        mapping_node.node_tree = get_or_create_mapping_node_group(xj_xvm.get_filename(), group_key)
 
         # Post-Mapping fold: brings a coordinate the Mapping transform pushed outside [0, 1) back
         # to a valid position to read from the base image - a property of the image itself (does
@@ -1334,7 +1482,7 @@ def set_obj_transforms_from_xj_node(obj: bpy.types.Object, node: XjMeshTreeNode)
         obj.location = (node.x / world_scale, -node.z / world_scale, node.y / world_scale)
 
 
-def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None) -> bpy.types.Object:
+def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xvm: xvm.Xvm | None, tam_entry: "tam.TamEntry | None" = None) -> bpy.types.Object:
     world_scale = util.get_pso_world_scale()
 
     # Group index buffers by their vertex buffer
@@ -1372,7 +1520,7 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
                     break
             if not found:
                 accumulated_material_settings.append(setting)
-        mat = make_material(name, accumulated_material_settings, node_id, i, xj_xvm)
+        mat = make_material(name, accumulated_material_settings, node_id, i, xj_xvm, tam_entry)
         index_buffer_materials[index_buffer.get_offset()] = (i, mat)
 
     # Get the attributes of each vertex buffer
@@ -1500,7 +1648,7 @@ def xj_node_to_blender_mesh(name: str, node: XjMeshTreeNode, node_id: int, xj_xv
     return obj
 
 
-def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None) -> bpy.types.Collection:
+def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None, tam_entry: "tam.TamEntry | None" = None) -> bpy.types.Collection:
     collection = bpy.data.collections.new(name)
 
     node_counter = 0
@@ -1518,7 +1666,7 @@ def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None
             obj.empty_display_size = 0.01
             set_obj_transforms_from_xj_node(obj, node)
         else:
-            obj = xj_node_to_blender_mesh(name, node, node_counter, xvm)
+            obj = xj_node_to_blender_mesh(name, node, node_counter, xvm, tam_entry)
             obj["mesh_offset"] = hex(node.mesh.get_offset())
         
         cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(NinjaEvalFlag(x).name for x in util.get_set_bits(node.eval_flags))
@@ -1583,8 +1731,12 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
             first_node_ptr = node_ptr
 
         if has_mesh:
-            # Create XJ mesh
-            blender_mesh = obj.to_mesh()
+            # Create XJ mesh - evaluated through the dependency graph, not obj.to_mesh() directly
+            # on the original object, which silently ignores any live/unapplied modifier
+            # (Decimate, Mirror, Subsurf, ...) and exports the raw base mesh instead.
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            eval_obj = obj.evaluated_get(depsgraph)
+            blender_mesh = eval_obj.to_mesh()
             util.scale_mesh(blender_mesh, util.get_pso_world_scale())
             mesh = make_mesh(njcm_chunk, obj, blender_mesh, texture_man)
 
@@ -1646,13 +1798,16 @@ def write(xj_path: str, xvm_path: str, root_objs: list[bpy.types.Object]):
     for obj in root_objs:
         all_objs += obj.children_recursive
     texture_man = xvm.TextureManager(all_objs)
-    xj_buf = make_xj(root_objs, texture_man)
+    try:
+        xj_buf = make_xj(root_objs, texture_man)
 
-    with open(xj_path, "wb") as f:
-        _ = f.write(xj_buf)
+        with open(xj_path, "wb") as f:
+            _ = f.write(xj_buf)
 
-    if xvm_path and texture_man.has_textures():
-        xvm.write(xvm_path, texture_man.get_all_textures())
+        if xvm_path and texture_man.has_textures():
+            xvm.write(xvm_path, texture_man.get_all_textures())
+    finally:
+        texture_man.cleanup_ephemeral_images()
 
 def read(xj_path: str, xj_xvm: xvm.Xvm | None) -> list[Collection]:
     filename = os.path.basename(xj_path)

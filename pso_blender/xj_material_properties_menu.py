@@ -118,6 +118,28 @@ def _set_generate_mipmaps(self: bpy.types.PropertyGroup, value: bool):
         group_tree["generate_mipmaps"] = value
 
 
+def _get_animation_frame_delay(self: bpy.types.PropertyGroup) -> int:
+    # Real animated .tam data (map_desert03, map_acity) always uses one uniform delay across
+    # every frame of a given animation - never a different value per frame - so a single shared
+    # value is enough to represent every real case seen so far, rather than a per-frame list.
+    image = util.find_diffuse_image(cast(bpy.types.Material, self.id_data))
+    if image is None or image.source != "SEQUENCE":
+        return 1
+    delays = image.get("pso_tam_frame_delays")
+    return int(delays[0]) if delays else 1
+
+
+def _set_animation_frame_delay(self: bpy.types.PropertyGroup, value: int):
+    # pso_tam_frame_delays (see get_or_build_animated_texture_image in xj.py) is what tam.write()
+    # (tam.py) reads back on export - overwriting it here, uniformly across every existing frame,
+    # is the entire mechanism: no other code needs to change for an edited speed to reach the
+    # exported .tam and, from there, the game.
+    image = util.find_diffuse_image(cast(bpy.types.Material, self.id_data))
+    if image is not None and image.source == "SEQUENCE":
+        frame_count = len(image.get("pso_tam_frame_delays") or [1])
+        image["pso_tam_frame_delays"] = [value] * frame_count
+
+
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class XjMaterialSettings(bpy.types.PropertyGroup):
     # Shared across every material variant of this texture (stored on the texture's ImgGroup node
@@ -138,6 +160,17 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         items=AlphaCompression_items,
         get=_get_alpha_compression,
         set=_set_alpha_compression)
+    # Shared across every material variant of this texture, same reasoning as generate_mipmaps -
+    # only meaningful (and only shown, see XjMaterialSettingsPanel.draw) when the texture is an
+    # imported animated sequence (image.source == "SEQUENCE").
+    animation_frame_delay: IntProperty(
+        name="Animation Frame Delay",
+        description="Game ticks each frame is shown before advancing to the next - higher is slower. "
+                     "Applies uniformly to every frame of this animation.",
+        min=1,
+        default=1,
+        get=_get_animation_frame_delay,
+        set=_set_animation_frame_delay)
     src_blend: EnumProperty(
         name="Source",
         default=str(BlendMode.D3DBLEND_SRCALPHA.name),
@@ -565,6 +598,9 @@ class XjMaterialSettingsPanel(bpy.types.Panel):
             select_faces_op.precise_face_selection = True
             self.layout.prop(settings, "generate_mipmaps")
             self.layout.prop(settings, "alpha_compression")
+            diffuse_image = util.find_diffuse_image(context.material)
+            if diffuse_image is not None and diffuse_image.source == "SEQUENCE":
+                self.layout.prop(settings, "animation_frame_delay")
             self.layout.prop(settings, "lighting")
             # Alpha blending
             blend_box = self.layout.box()
