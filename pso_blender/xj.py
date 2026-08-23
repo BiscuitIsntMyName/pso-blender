@@ -106,14 +106,21 @@ class VertexWithUv(VertexBase):
 
 @dataclass
 class VertexWithColor(VertexBase):
-    r: U8 = 0
-    g: U8 = 0
+    # Field declaration order is the on-disk byte order (see Serializable) - PSO stores vertex
+    # color as BGRA, not RGBA, confirmed live by the user: painting pure red in Blender came back
+    # blue in-game, and pure green came back green (not magenta) - the latter is what rules out a
+    # full byte-rotation theory (e.g. ARGB) in favor of a plain R/B swap, since swapping R and B
+    # never touches G. get_color()/set_color() below still expose/accept plain (r, g, b, a) tuples
+    # by field NAME, so every caller keeps thinking and working in ordinary RGBA - only the actual
+    # byte layout on disk changes here.
     b: U8 = 0
+    g: U8 = 0
+    r: U8 = 0
     a: U8 = 0
 
     def get_color(self) -> tuple[U8, U8, U8, U8]:
         return (self.r, self.g, self.b, self.a)
-    
+
     def set_color(self, color: tuple[U8, U8, U8, U8]):
         self.r = color[0]
         self.g = color[1]
@@ -192,10 +199,11 @@ class VertexFormat4(VertexWithColor, VertexWithPos):
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
-    # Purple default
-    r: U8 = 0xff
-    g: U8 = 0
+    # Purple default. BGRA on-disk order (see VertexWithColor) - "r"/"g"/"b" still refer to their
+    # own channel, only the declaration/byte order changed.
     b: U8 = 0xff
+    g: U8 = 0
+    r: U8 = 0xff
     a: U8 = 0xff
 
 
@@ -205,10 +213,10 @@ class VertexFormat5(VertexWithUv, VertexWithColor, VertexWithPos):
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
-    # Purple default
-    r: U8 = 0xff
-    g: U8 = 0
+    # Purple default. BGRA on-disk order (see VertexWithColor).
     b: U8 = 0xff
+    g: U8 = 0
+    r: U8 = 0xff
     a: U8 = 0xff
     u: F32 = 0.0
     v: F32 = 0.0
@@ -220,9 +228,10 @@ class VertexFormat6(VertexWithNormal, VertexWithColor, VertexWithPos):
     x: F32 = 0.0
     y: F32 = 0.0
     z: F32 = 0.0
-    r: U8 = 0xff
-    g: U8 = 0
+    # BGRA on-disk order (see VertexWithColor).
     b: U8 = 0xff
+    g: U8 = 0
+    r: U8 = 0xff
     a: U8 = 0xff
     nx: F32 = 0.0
     ny: F32 = 0.0
@@ -238,10 +247,10 @@ class VertexFormat7(VertexWithUv, VertexWithColor, VertexWithNormal, VertexWithP
     nx: F32 = 0.0
     ny: F32 = 0.0
     nz: F32 = 0.0
-    # Purple default
-    r: U8 = 0xff
-    g: U8 = 0
+    # Purple default. BGRA on-disk order (see VertexWithColor).
     b: U8 = 0xff
+    g: U8 = 0
+    r: U8 = 0xff
     a: U8 = 0xff
     u: F32 = 0.0
     v: F32 = 0.0
@@ -530,14 +539,15 @@ def write_vertex_buffer(
                         raise Exception("XJ error in object '{}': Invalid vertex color domain '{}'.".format(obj.name, vertex_colors.domain))
                 else:
                     col = vertex_colors.data[vert_idx].color
-                # VertexWithColor.get_color() (the read path) returns (self.r, self.g, self.b,
-                # self.a) with no channel reordering, so a pristine game-authored file's "r"
-                # field really does decode straight into Blender's red channel - the format is
-                # plain RGBA, not BGRA. This previously assigned col[0] (Blender's red) into the
-                # "b" field and col[2] (blue) into "r", a swap read never undid - harmless while
-                # only ever reading original files, but any mesh with real baked vertex-color
-                # lighting got its red/blue channels swapped on every export, visibly changing
-                # its overall tint. Need to clamp because light baking can cause values to go
+                # get_color()/set_color() work in plain (r, g, b, a) by field NAME - the actual
+                # on-disk byte order (declared on VertexWithColor) is BGRA, confirmed live by the
+                # user painting pure colors in Blender and checking in-game: red came back blue,
+                # green came back green (not magenta, which rules out a full byte-rotation format
+                # like ARGB - swapping just R/B never touches G). An earlier version of this
+                # comment claimed the format was plain RGBA and that a real R/B swap had been a
+                # bug - that was wrong; this is a genuine R/B swap, now fixed at the struct's field
+                # order instead of here, so this assignment can stay a plain, un-reordered
+                # (r, g, b, a) tuple. Need to clamp because light baking can cause values to go
                 # higher than normal.
                 vertex_attributes.r = int(util.clamp(col[0], 0.0, 1.0) * 0xff)
                 vertex_attributes.g = int(util.clamp(col[1], 0.0, 1.0) * 0xff)
