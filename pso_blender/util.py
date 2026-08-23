@@ -123,6 +123,18 @@ class ModalStepOperator:
             cast(Any, self).report({"ERROR"}, str(e))
             return {"CANCELLED"}
 
+    def cancel(self, context: bpy.types.Context):
+        # Blender calls THIS - not modal() - when a modal operator's handler is torn down by any
+        # means other than modal() itself returning {'CANCELLED'}/{'FINISHED'} (confirmed to
+        # actually happen live: pressing Escape during an import leaves the operator without a
+        # single further TIMER event, so modal()'s own except/StopIteration branches never run).
+        # Without this override, _cleanup_modal_steps() never runs on that path, permanently
+        # leaking use_global_undo=False (and the progress cursor/timer) for the rest of the
+        # Blender session - confirmed live: Escaping an import left Global Undo unchecked in
+        # Preferences, and every later action (including plain object moves) stopped having any
+        # undo history at all, with no error or other symptom to point at the cause.
+        self._cleanup_modal_steps(context)
+
     def _cleanup_modal_steps(self, context: bpy.types.Context):
         wm = context.window_manager
         wm.progress_end()
