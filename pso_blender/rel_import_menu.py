@@ -2,7 +2,7 @@ from typing import cast, final
 import bpy, os
 from bpy.types import Context, Event, Operator
 from bpy.props import BoolProperty, StringProperty  # pyright: ignore[reportUnknownVariableType]
-from . import c_rel, n_rel, xvm
+from . import c_rel, n_rel, xvm, recent_rel_menu
 from .util import ModalStepOperator, variantless_map_basename
 
 
@@ -52,6 +52,14 @@ class ImportRel(ModalStepOperator, Operator):  # pyright: ignore[reportIncompati
 
     bl_idname = "import_scene.rel"
     bl_label = "Import REL"
+    # Deliberately excludes 'UNDO'. A real map import creates hundreds of interdependent
+    # datablocks (objects, materials, shared ImgGroup node groups, images) across many separate
+    # modal timer steps (see ModalStepOperator in util.py) rather than one atomic call - redoing
+    # that many cross-referencing datablocks from a single undo step has been observed to corrupt
+    # shared node group wiring (Image Texture nodes losing their .image reference, materials
+    # rendering solid black) after Ctrl+Z followed by Redo. Not participating in undo at all means
+    # an import can't be corrupted this way - to remove an import, delete its Collection manually.
+    bl_options = {"REGISTER"}
 
     # A standalone dialog (invoke_props_dialog, opened directly from invoke() below) rather than
     # Blender's native file browser: Blender can't have two file-select browsers open at once, so
@@ -73,18 +81,8 @@ class ImportRel(ModalStepOperator, Operator):  # pyright: ignore[reportIncompati
 
     def draw(self, context: Context):
         layout = self.layout
-        rel_path = cast(str, self.rel_path)
-        if not (rel_path and os.path.isfile(rel_path)):
-            layout.alert = True
         layout.prop(self, "rel_path")
-        layout.alert = False
-        xvm_path = cast(str, self.xvm_path)
-        if not (xvm_path and os.path.isfile(xvm_path)):
-            layout.alert = True
         layout.prop(self, "xvm_path")
-        layout.alert = False
-        # Not alerted when empty/missing, unlike rel_path/xvm_path - unlike those, having no TAM
-        # at all is a common, unremarkable case (most maps have no animated textures).
         layout.prop(self, "tam_path")
 
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -92,6 +90,11 @@ class ImportRel(ModalStepOperator, Operator):  # pyright: ignore[reportIncompati
         if not rel_filename or not os.path.isfile(rel_filename):
             self.report({"ERROR"}, "REL file not found: '{}'".format(rel_filename))
             return {"CANCELLED"}
+        # Recorded up front (not only on a confirmed-successful finish()) so the File > Import >
+        # pso-blender > REL submenu and the viewport N-panel (see recent_rel_menu.py) offer a
+        # one-click reimport of this same combination even if the import itself later fails
+        # partway through - the paths themselves were still valid enough to attempt.
+        recent_rel_menu.record_recent_rel(rel_filename, cast(str, self.xvm_path), cast(str, self.tam_path))
         filename_no_ext, _filename_ext = os.path.splitext(os.path.basename(rel_filename))
         map_type_suffix = filename_no_ext[-1] if filename_no_ext else ""
 

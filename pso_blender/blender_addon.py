@@ -1,4 +1,4 @@
-from typing import Any, cast
+from typing import Any, cast, final
 import bpy
 from bpy.props import PointerProperty
 from bpy.app.handlers import persistent, load_post
@@ -28,6 +28,8 @@ from .xj_material_properties_menu import (
     draw_send_asset_pack_to_imggroup_menu_item,
     draw_send_file_to_imggroup_menu_item)
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
+from .preferences_menu import PsoClearXvrCache, PsoBlenderAddonPreferences
+from .recent_rel_menu import ImportRecentRel, PSO_MT_import_rel_recent, PSO_PT_recent_rel
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -54,19 +56,45 @@ xj_import_export_description = "XJ (PSO)"
 xvm_export_description = "XVM texture pack (PSO)"
 
 
+@final
+class PSO_MT_export(bpy.types.Menu):  # pyright: ignore[reportIncompatibleMethodOverride]
+    bl_idname = "PSO_MT_export"
+    bl_label = "pso-blender"
+
+    def draw(self, context: bpy.types.Context):  # pyright: ignore[reportIncompatibleMethodOverride]
+        layout = self.layout
+        if not layout:
+            return
+        layout.operator(ExportRel.bl_idname, text=rel_import_export_description)
+        layout.operator(ExportBml.bl_idname, text=bml_import_export_description)
+        layout.operator(ExportXj.bl_idname, text=xj_import_export_description)
+        layout.operator(ExportXvm.bl_idname, text=xvm_export_description)
+
+
+@final
+class PSO_MT_import(bpy.types.Menu):  # pyright: ignore[reportIncompatibleMethodOverride]
+    bl_idname = "PSO_MT_import"
+    bl_label = "pso-blender"
+
+    def draw(self, context: bpy.types.Context):  # pyright: ignore[reportIncompatibleMethodOverride]
+        layout = self.layout
+        if not layout:
+            return
+        # REL gets its own submenu (Select File... + recent history) rather than a plain
+        # operator entry - see recent_rel_menu.py.
+        layout.menu(PSO_MT_import_rel_recent.bl_idname, text=rel_import_export_description)
+        layout.operator(ImportBml.bl_idname, text=bml_import_export_description)
+        layout.operator(ImportXj.bl_idname, text=xj_import_export_description)
+
+
 def menu_func_export(self: bpy.types.Menu, _context: bpy.types.Context):
     if self.layout:
-        _ = self.layout.operator(ExportRel.bl_idname, text=rel_import_export_description)
-        _ = self.layout.operator(ExportBml.bl_idname, text=bml_import_export_description)
-        _ = self.layout.operator(ExportXj.bl_idname, text=xj_import_export_description)
-        _ = self.layout.operator(ExportXvm.bl_idname, text=xvm_export_description)
+        self.layout.menu(PSO_MT_export.bl_idname)
 
 
 def menu_func_import(self: bpy.types.Menu, _context: bpy.types.Context):
     if self.layout:
-        _ = self.layout.operator(ImportRel.bl_idname, text=rel_import_export_description)
-        _ = self.layout.operator(ImportBml.bl_idname, text=bml_import_export_description)
-        _ = self.layout.operator(ImportXj.bl_idname, text=xj_import_export_description)
+        self.layout.menu(PSO_MT_import.bl_idname)
 
 
 classes = [
@@ -90,7 +118,14 @@ classes = [
     XjSendAssetPackToImgGroup,
     XjSendFileToImgGroup,
     NjcmNodeSettings,
-    NjcmNodeSettingsPanel
+    NjcmNodeSettingsPanel,
+    PsoClearXvrCache,
+    PsoBlenderAddonPreferences,
+    ImportRecentRel,
+    PSO_MT_import_rel_recent,
+    PSO_PT_recent_rel,
+    PSO_MT_import,
+    PSO_MT_export
 ]
 
 

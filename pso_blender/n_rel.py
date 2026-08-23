@@ -61,6 +61,14 @@ KNOWN_TREE_FLAGS_MASK = (
     | MeshTreeFlag.HAS_TEXTURE_ANIMATION | MeshTreeFlag.IS_STENCIL_VIEWER | MeshTreeFlag.IS_STENCILED
     | MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE)
 
+# Every current NinjaEvalFlag value already has a UI setting (unlike tree_flags above, where only
+# some known bits have one) - so any XjMeshTreeNode.eval_flags bit outside this mask is
+# unrecognized and must be preserved verbatim from obj["orig_eval_flags"] instead of being
+# recomputed, same principle as KNOWN_TREE_FLAGS_MASK/orig_tree_flags.
+KNOWN_EVAL_FLAGS_MASK = 0
+for _f in NinjaEvalFlag:
+    KNOWN_EVAL_FLAGS_MASK |= _f.value
+
 
 @dataclass
 class TextureAnimationInfo(Serializable):
@@ -403,7 +411,9 @@ def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.
                 static_mesh_tree.texture_animation_info = Ptr32(rel.write(
                     TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff)))
             
-            eval_flags = 0
+            # Start from any unrecognized eval_flags bits preserved from the original file (see
+            # KNOWN_EVAL_FLAGS_MASK above), then OR in the known bits the UI actually exposes.
+            eval_flags = cast(int, obj.get("orig_eval_flags", 0)) & ~KNOWN_EVAL_FLAGS_MASK
             for flag_name in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
                 eval_flags |= getattr(NinjaEvalFlag, flag_name).value
 

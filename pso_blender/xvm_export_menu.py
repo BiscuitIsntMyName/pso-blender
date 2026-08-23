@@ -1,5 +1,5 @@
 from typing import cast, final
-import bpy, os
+import bpy, os, time
 from bpy_extras.io_utils import ExportHelper
 from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
@@ -66,8 +66,13 @@ class ExportXvm(ModalStepOperator, Operator, ExportHelper):  # pyright: ignore[r
         # dropping the rest back to their original, unreplaced content.
         util.get_object_diffuse_textures.cache_clear()
         seen_material_names: set[str] = set()
-        by_pso_id: dict[int, util.Texture] = {}
-        conflicting_pso_ids: dict[int, set[str]] = {}
+        # pso_id -> {image name -> Texture}: a plain "pso_id -> Texture" dict would silently drop
+        # every variant but the last-seen one whenever two DIFFERENT animations legitimately share
+        # one base texture slot's pso_id (confirmed on real map data, e.g. Ephinea's map_acity00 -
+        # animation_id 2 and 61 both declare tex_id 221/pso_id 1303213 as their starting texture,
+        # each with its own distinct frame content) - keyed by image name so every distinct variant
+        # survives instead of being treated as an unresolvable conflict.
+        by_pso_id: dict[int, dict[str, util.Texture]] = {}
         unresolved: list[str] = []
         source_paths: set[str] = set()
         for obj in all_objs:
@@ -82,10 +87,7 @@ class ExportXvm(ModalStepOperator, Operator, ExportHelper):  # pyright: ignore[r
                 original_id, source_path = resolved
                 tex.id = original_id
                 source_paths.add(source_path)
-                existing = by_pso_id.get(original_id)
-                if existing is not None and existing.image.name != tex.image.name:
-                    conflicting_pso_ids.setdefault(original_id, {existing.image.name}).add(tex.image.name)
-                by_pso_id[original_id] = tex
+                by_pso_id.setdefault(original_id, {})[tex.image.name] = tex
 
         if not by_pso_id and not unresolved:
             self.report({"WARNING"}, "No textures found on selected objects")
@@ -96,16 +98,6 @@ class ExportXvm(ModalStepOperator, Operator, ExportHelper):  # pyright: ignore[r
                 "weren't created by this addon's XJ/REL import (or were renamed), so a "
                 "standalone XVM export can't know which slot the existing .xj/.rel files expect "
                 "them in.").format(", ".join(unresolved)))
-            return {"CANCELLED"}
-        if conflicting_pso_ids:
-            details = "; ".join(
-                "PSO id {} has both {}".format(pso_id, " and ".join(sorted(names)))
-                for pso_id, names in conflicting_pso_ids.items())
-            self.report({"ERROR"}, (
-                "Some material variants of the same original texture now point at different "
-                "images, so it's ambiguous what to export for that texture slot: {}. Make sure "
-                "every material sharing a texture (see \"Select Objects Using This Texture\") "
-                "was updated to the same replacement image.").format(details))
             return {"CANCELLED"}
         if len(source_paths) > 1:
             self.report({"ERROR"}, (
@@ -125,23 +117,53 @@ class ExportXvm(ModalStepOperator, Operator, ExportHelper):  # pyright: ignore[r
         # texture where the scene has one, otherwise carry the original chunk through byte for
         # byte. This keeps every slot position exactly as the untouched .xj/.rel files expect,
         # even for textures this particular scene doesn't reference at all (other mesh files
-        # sharing this same .xvm might). Done one xvr at a time via a modal timer (see
-        # ModalStepOperator in util.py) rather than one big blocking loop, so a real progress
-        # indicator can actually be shown for what's usually the slowest part of an export
-        # (DXT compression, optionally with a full mip chain per texture).
+        # sharing this same .xvm might). Any extra variant sharing a slot's pso_id (see by_pso_id
+        # above) gets appended as a brand-new entry afterward instead of being dropped - mirrors
+        # how the full REL/XVM export (TextureManager) already represents these. Done one xvr at a
+        # time via a modal timer (see ModalStepOperator in util.py) rather than one big blocking
+        # loop, so a real progress indicator can actually be shown for what's usually the slowest
+        # part of an export (DXT compression, optionally with a full mip chain per texture).
+        extra_count = sum(len(variants) - 1 for variants in by_pso_id.values())
         self._filepath = filepath
         self._base_xvrs = base_xvm.xvrs
         self._by_pso_id = by_pso_id
         self._output_xvrs = []
-        return self.start_modal_steps(context, self._build_output_xvrs(), len(base_xvm.xvrs))
+        return self.start_modal_steps(context, self._build_output_xvrs(), len(base_xvm.xvrs) + extra_count)
 
     def _build_output_xvrs(self):
-        for base_xvr in self._base_xvrs:
-            if base_xvr.id in self._by_pso_id:
-                self._output_xvrs.append(xvm.make_xvr(self._by_pso_id[base_xvr.id]))
-            else:
+        # Same cache the full-rebuild REL/XVM export path uses (xvm.write() / get_or_make_xvr()) -
+        # a standalone re-export of an unchanged replacement texture reuses its cached encode
+        # instead of always re-running DXT compression, and both export paths can never again
+        # silently diverge in what encoding they serve for the same texture.
+        cache_dir_path = xvm.xvr_cache_root(os.path.basename(self._filepath))
+        consumed: set[tuple[int, str]] = set()
+        for i, base_xvr in enumerate(self._base_xvrs):
+            variants = self._by_pso_id.get(base_xvr.id)
+            if not variants:
                 self._output_xvrs.append(base_xvr)
+                yield
+                continue
+            # Prefer the variant whose image was originally imported from exactly this array
+            # position (pso_orig_tex_id, stashed at import time - see make_material/get_or_build_
+            # animated_texture_image in xj.py) - that's the one that actually belongs at this
+            # slot. Any other variant sharing this pso_id doesn't have a position of its own in
+            # the original file (e.g. a second animation that legitimately starts from the same
+            # base texture) and gets appended separately below instead of overwriting this slot.
+            primary = next((tex for tex in variants.values() if tex.image.get("pso_orig_tex_id") == i), None)
+            if primary is None:
+                primary = next(iter(variants.values()))
+            self._output_xvrs.append(xvm.get_or_make_xvr(primary, cache_dir_path))
+            consumed.add((base_xvr.id, primary.image.name))
             yield
+        extra_id_counter = int(time.time()) & 0xffffffff
+        for pso_id, variants in self._by_pso_id.items():
+            for image_name, tex in variants.items():
+                if (pso_id, image_name) in consumed:
+                    continue
+                tex.id = extra_id_counter
+                extra_id_counter += 1
+                self._output_xvrs.append(xvm.get_or_make_xvr(tex, cache_dir_path))
+                yield
 
     def finish(self, context: Context):
         xvm.write_xvrs(self._filepath, self._output_xvrs)

@@ -49,14 +49,28 @@ class ModalStepOperator:
     _modal_timer: bpy.types.Timer | None = None
     _modal_steps: Generator[None, None, None] | None = None
     _modal_done: int = 0
+    _prev_use_global_undo: bool = True
 
     def start_modal_steps(self, context: bpy.types.Context, steps: Generator[None, None, None], total: int):
+        # A real import/export creates or touches hundreds of interdependent datablocks (objects,
+        # materials, shared ImgGroup node groups, images) across many separate modal timer steps
+        # rather than one atomic call. Leaving Blender's global undo system on for the whole
+        # duration has been observed to corrupt shared node group wiring on a later Undo+Redo
+        # (Image Texture nodes losing their .image reference, materials rendering solid black) -
+        # excluding 'UNDO' from the operator's own bl_options was not enough to prevent this by
+        # itself. Disabling global undo for the whole operation (restored once it finishes, in
+        # finish()/_cleanup_modal_steps, including on error) sidesteps this entirely.
+        self._prev_use_global_undo = context.preferences.edit.use_global_undo
+        context.preferences.edit.use_global_undo = False
         if bpy.app.background:
             # No window/event loop to pump TIMER events through in headless (--background) mode -
             # and no UI to show a progress bar in either way - so just run every step
             # synchronously, exactly like a plain blocking loop would. Only interactive sessions
             # actually need (and can show) the modal/timer-driven version below.
-            return self._run_steps_synchronously(context, steps)
+            try:
+                return self._run_steps_synchronously(context, steps)
+            finally:
+                context.preferences.edit.use_global_undo = self._prev_use_global_undo
         wm = context.window_manager
         self._modal_steps = steps
         self._modal_done = 0
@@ -115,6 +129,7 @@ class ModalStepOperator:
         if self._modal_timer is not None:
             wm.event_timer_remove(self._modal_timer)
             self._modal_timer = None
+        context.preferences.edit.use_global_undo = self._prev_use_global_undo
 
     def finish(self, context: bpy.types.Context):
         """Called once every step has completed successfully - override for any final assembly
@@ -144,7 +159,18 @@ class Texture:
 
     def __init__(self, *, id: int, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
-        self.name = image.filepath_from_user() or image.name # Path can be empty if texture was created programmatically
+        # bpy.path.abspath(image.filepath), NOT image.filepath_from_user() - the latter resolves
+        # dynamically against the CURRENT scene frame + a generic default ImageUser, and only
+        # starts doing so once the image has actually been evaluated for display (e.g. Material
+        # Preview) - the exact same instability already root-caused and fixed in xvm.py's
+        # get_image_sequence_images (see that function's comment). Here it corrupted something
+        # worse than a wrong read: TextureManager uses this .name as its DEDUPLICATION key, so an
+        # animated (SEQUENCE-source) texture's base image - whose live-resolved path drifts onto
+        # its own frame 1 once Material Preview has run - collides with that frame's own Texture
+        # entry and silently swallows it, permanently dropping one real frame from the export.
+        # image.filepath is the static, load-time path, never re-resolved against any ImageUser or
+        # scene frame - stable regardless of what's been previewed in this Blender session.
+        self.name = bpy.path.abspath(image.filepath) if image.filepath else image.name # Path can be empty if texture was created programmatically
         self.material_name = material_name
         self.image = image
         self.generate_mipmaps = generate_mipmaps

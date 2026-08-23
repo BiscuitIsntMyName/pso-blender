@@ -13,6 +13,12 @@ class ImportBml(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
 
     bl_idname = "import_scene.bml"
     bl_label = "Import BML"
+    # Deliberately excludes 'UNDO' - see the identical comment on ImportRel (rel_import_menu.py):
+    # importing creates many interdependent datablocks (objects, materials, shared ImgGroup node
+    # groups, images), and redoing that many cross-referencing datablocks from a single undo step
+    # has been observed to corrupt shared node group wiring. Delete the resulting objects manually
+    # to remove an import instead of relying on Ctrl+Z.
+    bl_options = {"REGISTER"}
 
     filter_glob: StringProperty(
         default="*.bml;*.xvm",
@@ -51,9 +57,17 @@ class ImportBml(Operator, ImportHelper):  # pyright: ignore[reportIncompatibleMe
         if bml_path is None:
             self.report({"ERROR"}, "No .bml selected")
             return {"CANCELLED"}
-        bml_xvm = xvm.read(xvm_path) if xvm_path else None
-        collections = bml.read(bml_path, bml_xvm)
-        if bpy.context.scene is not None:
-            for coll in collections:
-                bpy.context.scene.collection.children.link(coll)
-        return {"FINISHED"}
+        # See the identical use_global_undo comment on ModalStepOperator.start_modal_steps
+        # (util.py) - this import creates many interdependent datablocks in one go, which has been
+        # observed to corrupt shared node group wiring on a later Undo+Redo if global undo stays on.
+        prev_use_global_undo = context.preferences.edit.use_global_undo
+        context.preferences.edit.use_global_undo = False
+        try:
+            bml_xvm = xvm.read(xvm_path) if xvm_path else None
+            collections = bml.read(bml_path, bml_xvm)
+            if bpy.context.scene is not None:
+                for coll in collections:
+                    bpy.context.scene.collection.children.link(coll)
+            return {"FINISHED"}
+        finally:
+            context.preferences.edit.use_global_undo = prev_use_global_undo

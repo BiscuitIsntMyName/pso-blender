@@ -25,7 +25,18 @@ NULLPTR = Numeric.NULLPTR
 
 # Can't figure out how to get all of the frames out of an image sequence shader node, so we need to do it like this
 def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
-    dirname = os.path.dirname(img.filepath_from_user())
+    # filepath_from_user() resolves to whatever frame Blender's CURRENT scene frame + default
+    # ImageUser (frame_start=1, frame_offset=0) maps to - not the custom frame_start=0/
+    # frame_offset=-1 that lives on this sequence's specific node (get_or_create_texture_node_
+    # group, xj.py), which filepath_from_user() has no way to know about since ImageUser belongs
+    # to the node, not the Image datablock. That mismatch resolves to frame 1 instead of frame 0
+    # as soon as the sequence has actually been evaluated for display (e.g. Material Preview
+    # shading) - confirmed via a live Blender session, every animated texture's filepath pointed
+    # at "1.png" instead of "0.png" after switching to Material Preview and reading back
+    # img.filepath_from_user(). filepath (no _from_user) is the static, load-time path - "0.png",
+    # as originally passed to bpy.data.images.load() - and is never re-resolved based on the
+    # current frame, so it's immune to this entirely.
+    dirname = os.path.dirname(bpy.path.abspath(img.filepath))
     frame_names: list[str] = []
     for item in os.listdir(dirname):
         if os.path.isfile(os.path.join(dirname, item)):
@@ -37,6 +48,40 @@ def get_image_sequence_images(img: bpy.types.Image) -> list[bpy.types.Image]:
         bpy.data.images.load(os.path.join(dirname, name), check_existing=True)
         # Sort filenames in numeric order
         for name in sorted(frame_names, key=lambda key: int(os.path.basename(os.path.splitext(key)[0])))]
+
+
+# Keyed by the live SEQUENCE image's own name -> the NAME (not a direct object reference - a
+# reloaded .blend/file, e.g. bpy.ops.wm.read_homefile, frees every existing Image datablock,
+# leaving any cached reference to one dangling and raising ReferenceError on next access) of an
+# independent, non-SEQUENCE copy of its frame 0 file. Shared by every caller that needs stable
+# pixels for a SEQUENCE-source image (make_xvr, texture_checksum) so the substitute is loaded once
+# and reused, not once per call site.
+_stable_sequence_images: dict[str, str] = {}
+
+
+def get_stable_source_image(image: bpy.types.Image) -> bpy.types.Image:
+    """Reading .pixels/.size/.channels/.alpha_mode directly off a SEQUENCE-source image is
+    unreliable: Blender buffers whichever frame the scene's CURRENT timeline frame resolves to for
+    that image (and only starts doing so once it's been evaluated for display, e.g. Material
+    Preview) - not necessarily frame 0. Confirmed live: toggling Material Preview changed an
+    otherwise-untouched animated texture's exported content in both the full REL export (via
+    TextureManager, fixed once already) AND the standalone "Export XVM" operator - the latter
+    builds its own Texture objects directly (util.get_object_diffuse_textures), bypassing whatever
+    TextureManager does entirely, so a per-caller fix doesn't cover it. Centralizing the fix here,
+    where the actual unstable read happens (make_xvr, texture_checksum), covers every current and
+    future caller instead of requiring each one to pre-stabilize its own Texture objects. No-op for
+    any image whose source isn't SEQUENCE."""
+    if image.source != "SEQUENCE":
+        return image
+    stable_name = _stable_sequence_images.get(image.name)
+    if stable_name is not None:
+        existing = bpy.data.images.get(stable_name)
+        if existing is not None:
+            return existing
+    stable = bpy.data.images.load(bpy.path.abspath(image.filepath), check_existing=False)
+    stable.name = "{}_stable_frame0".format(image.name)
+    _stable_sequence_images[image.name] = stable.name
+    return stable
 
 
 @final
@@ -171,23 +216,34 @@ class TextureManager:
                     # Get animated textures
                     frames = get_image_sequence_images(tex.image)
                     tex.animation_frames = len(frames)
+                    orig_seq_image = tex.image
                     all_textures.append(tex)
                     for i, frame in enumerate(frames):
                         # check_existing (see get_image_sequence_images) means frame 0 resolves to
                         # the exact same datablock as tex.image itself (loaded from the identical
-                        # file path at import time) - that one is already correctly named and is a
-                        # real, in-use image, not an export-only throwaway, so leave it alone.
-                        if frame != tex.image:
-                            frame.name = "{}_frame{}".format(tex.image.name, i)
-                            self._ephemeral_frame_images.append(frame.name)
-                            # Same original-order sort key as the base/frame-0 image (which
-                            # already carries this, stamped at import - see make_material and
-                            # get_or_build_animated_texture_image in xj.py) - a frame image has no
-                            # tex_id of its own, but should still sort adjacent to its animation's
-                            # other frames instead of falling back to alphabetical.
-                            orig_tex_id = tex.image.get("pso_orig_tex_id")
-                            if orig_tex_id is not None:
-                                frame["pso_orig_tex_id"] = orig_tex_id
+                        # file path at import time), still source == 'SEQUENCE' - already covered
+                        # by `tex` above (which keeps its real identity/animation_frames/custom
+                        # properties intact), nothing more to do for it here. The instability this
+                        # used to work around here (reading .pixels straight off a SEQUENCE image
+                        # depends on Blender's current scene frame / whether it's been evaluated
+                        # for display, e.g. Material Preview) is now handled once, centrally, in
+                        # make_xvr()/texture_checksum() via get_stable_source_image() - which also
+                        # covers the standalone "Export XVM" operator, since it builds its own
+                        # Texture objects directly and never went through this __init__ at all
+                        # (confirmed live: Export XVM's animated-texture content still changed with
+                        # Material Preview toggled, even after this exact case was fixed here).
+                        if frame == orig_seq_image:
+                            continue
+                        frame.name = "{}_frame{}".format(orig_seq_image.name, i)
+                        self._ephemeral_frame_images.append(frame.name)
+                        # Same original-order sort key as the base/frame-0 image (which
+                        # already carries this, stamped at import - see make_material and
+                        # get_or_build_animated_texture_image in xj.py) - a frame image has no
+                        # tex_id of its own, but should still sort adjacent to its animation's
+                        # other frames instead of falling back to alphabetical.
+                        orig_tex_id = orig_seq_image.get("pso_orig_tex_id")
+                        if orig_tex_id is not None:
+                            frame["pso_orig_tex_id"] = orig_tex_id
                         all_textures.append(
                             Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
                 else:
@@ -258,8 +314,12 @@ class TextureManager:
         return self._has_anim_tex
     
     def get_object_animated_texture(self, obj: bpy.types.Object) -> Texture | None:
+        # animation_frames, not tex.image.source == "SEQUENCE": both work today, but
+        # animation_frames is the more direct signal - it's set once, right here in __init__, on
+        # the Texture object itself, rather than being inferred from whatever Image .image happens
+        # to point at.
         for tex in self.get_object_textures(obj):
-            if tex.image.source == "SEQUENCE":
+            if tex.animation_frames > 0:
                 return tex
         return None
 
@@ -277,10 +337,21 @@ class TextureManager:
         self._ephemeral_frame_images = []
 
 
+# Bump whenever make_xvr()'s encoding (mip generation, DXT compression, alpha handling, etc.)
+# changes in a way that alters output bytes for otherwise-unchanged input - texture_checksum has
+# no other way to know the cached .xvr was written by an older, since-improved version of that
+# code, so a stale cache entry would otherwise keep being served forever (see write()'s cache
+# lookup) even after a fix. Confirmed as the cause of REL exports (which go through write()'s
+# cache) looking pixelated/lower quality than a standalone Export XVM (which always calls
+# make_xvr() directly, bypassing the cache) on maps exported before the gamma-correct mip
+# averaging / DXT1 punch-through fixes landed.
+CACHE_FORMAT_VERSION = 2
+
+
 def texture_checksum(tex: Texture) -> str:
     mat = bpy.data.materials.get(tex.material_name)
     group_tree = find_material_img_group_tree(mat) if mat is not None else None
-    data: list[float] = []
+    data: list[float] = [float(CACHE_FORMAT_VERSION)]
     if group_tree is not None:
         # Generic, not hardcoded to "the diffuse image" - make_xvr() may bake the group's actual
         # Color/Alpha output instead of reading tex.image directly once it's been customized (see
@@ -294,9 +365,9 @@ def texture_checksum(tex: Texture) -> str:
                 continue
             image = cast(bpy.types.ShaderNodeTexImage, node).image
             if image is not None:
-                data.extend(list(cast(Any, image).pixels))
+                data.extend(list(cast(Any, get_stable_source_image(image)).pixels))
     else:
-        data.extend(list(cast(Any, tex.image).pixels))
+        data.extend(list(cast(Any, get_stable_source_image(tex.image)).pixels))
     data.append(float(tex.generate_mipmaps))
     # make_xvr() also bakes in the material's Mapping node transform - without folding that into
     # the checksum too, editing only the Mapping node (not the image) would leave the checksum
@@ -639,19 +710,23 @@ def bake_material_mapping(mat: bpy.types.Material, pixels: list[float], width: i
 
 
 def make_xvr(tex: Texture) -> Xvr:
-    img_width, img_height = tex.image.size
+    # get_stable_source_image: reading a SEQUENCE-source image's own properties/pixels directly
+    # depends on Blender's current scene frame / whether it's been evaluated for display (e.g.
+    # Material Preview) - see that function's docstring. A no-op for any other image source.
+    stable_image = get_stable_source_image(tex.image)
+    img_width, img_height = stable_image.size
     flags = 0
     if tex.generate_mipmaps:
         flags |= XvrFlags.MIPMAPS
     is_premultiplied = False
     if tex.has_alpha:
-        if tex.image.alpha_mode == "PREMUL":
+        if stable_image.alpha_mode == "PREMUL":
             is_premultiplied = True
-        elif tex.image.alpha_mode != "STRAIGHT":
-            raise Exception("XVR Error in Image '{}': Image has unsupported alpha mode '{}'".format(tex.image.filepath, tex.image.alpha_mode))
+        elif stable_image.alpha_mode != "STRAIGHT":
+            raise Exception("XVR Error in Image '{}': Image has unsupported alpha mode '{}'".format(stable_image.filepath, stable_image.alpha_mode))
         flags |= XvrFlags.ALPHA
 
-    channels = tex.image.channels
+    channels = stable_image.channels
     mat = bpy.data.materials.get(tex.material_name)
     group_tree = find_material_img_group_tree(mat) if mat is not None else None
     baked = bake_texture_group(group_tree, img_width, img_height) if group_tree is not None else None
@@ -663,7 +738,7 @@ def make_xvr(tex: Texture) -> Xvr:
         pixels = baked
         channels = 4
     else:
-        pixels = list(cast(Any, tex.image).pixels)
+        pixels = list(cast(Any, stable_image).pixels)
     if mat is not None:
         pixels = bake_material_mapping(mat, pixels, img_width, img_height, channels)
 
@@ -760,32 +835,56 @@ def write_xvrs(path: str, xvrs: list[Xvr]):
         _ = f.write(buf.buffer)
 
 
-def write(path: str, textures: list[Texture]):
-    # Cache xvr files in a subdirectory inside the destination directory
-    cache_dir = "pso-blender-cache"
+def xvr_cache_base_dir() -> str:
+    """Parent of every per-map xvr_cache_root() folder - the whole thing this addon's "Clear
+    Texture Cache" preferences button wipes (see preferences_menu.py), as opposed to any single
+    map's subfolder."""
+    return bpy.utils.user_resource("DATAFILES", path=os.path.join("pso_blender_cache", "xvr"), create=True)
+
+
+def xvr_cache_root(xvm_filename: str) -> str:
+    """Where cached compressed .xvr textures for one .xvm live - Blender's per-user data
+    directory, not next to the exported .xvm. Same reasoning and same top-level "pso_blender_cache"
+    resource dir as xj.animated_texture_cache_root (kept in its own "xvr" subfolder so the two
+    caches' contents - compressed textures here, decoded animation-frame PNGs there - never mix):
+    a destination folder is very often the game's own install folder, and this cache has no
+    business creating files there. Scoped per xvm_filename so two different maps that happen to
+    both have a texture named e.g. "wall.png" don't clobber each other's cached encode."""
+    return os.path.join(xvr_cache_base_dir(), xvm_filename)
+
+
+def get_or_make_xvr(tex: Texture, cache_dir_path: str) -> Xvr:
+    """Single entry point for turning a Texture into an Xvr that both the full-rebuild REL/XVM
+    export (write(), below) and the standalone selective-replace Export XVM operator
+    (xvm_export_menu.py) go through - so a cache hit/miss decision is made exactly once, the same
+    way, regardless of which export triggered it. Deliberately not two separate cached/uncached
+    code paths: that split is what let a stale pre-quality-fix cache entry silently keep being
+    served by REL export while a standalone Export XVM (which used to call make_xvr() directly,
+    bypassing the cache) always looked correct - see CACHE_FORMAT_VERSION and texture_checksum().
+    """
     xvr_ext = ".xvr"
-    (dirname, _) = os.path.split(path)
-    # Index contains checksums of files
-    cache_index_path = os.path.join(dirname, cache_dir, "index.json")
+    pathlib.Path(cache_dir_path).mkdir(parents=True, exist_ok=True)  # Create dir if not exist
+    (_, basename) = os.path.split(tex.name)
+    xvr_basename = basename + xvr_ext
+    cached_xvr_path = os.path.join(cache_dir_path, xvr_basename)
+    cache_index_path = os.path.join(cache_dir_path, "index.json")
     cache_index = load_cache_index(cache_index_path)
-    xvrs: list[Xvr] = []
-    for tex in textures:
-        (_, basename) = os.path.split(tex.name)
-        cache_dir_path = os.path.join(dirname, cache_dir)
-        pathlib.Path(cache_dir_path).mkdir(exist_ok=True) # Create dir if not exist
-        xvr_basename = basename + xvr_ext
-        cached_xvr_path = os.path.join(cache_dir_path, xvr_basename)
-        # Try to load cached textures from destination directory if pixels have not changed
-        checksum = texture_checksum(tex)
-        if os.path.isfile(cached_xvr_path) and checksum == cache_index.get(xvr_basename):
-            xvr = get_cached_xvr(cached_xvr_path)
-            xvr.id = tex.id # Use new texture id
-        else:
-            xvr = make_xvr(tex)
-            cache_xvr(cached_xvr_path, xvr)
-        cache_index[xvr_basename] = checksum
-        save_cache_index(cache_index_path, cache_index)
-        xvrs.append(xvr)
+    # Try to load cached textures from destination directory if pixels have not changed
+    checksum = texture_checksum(tex)
+    if os.path.isfile(cached_xvr_path) and checksum == cache_index.get(xvr_basename):
+        xvr = get_cached_xvr(cached_xvr_path)
+        xvr.id = tex.id  # Use new texture id
+    else:
+        xvr = make_xvr(tex)
+        cache_xvr(cached_xvr_path, xvr)
+    cache_index[xvr_basename] = checksum
+    save_cache_index(cache_index_path, cache_index)
+    return xvr
+
+
+def write(path: str, textures: list[Texture]):
+    cache_dir_path = xvr_cache_root(os.path.basename(path))
+    xvrs = [get_or_make_xvr(tex, cache_dir_path) for tex in textures]
     write_xvrs(path, xvrs)
 
 

@@ -26,6 +26,14 @@ I32 = Numeric.I32
 F32 = Numeric.F32
 NULLPTR = Numeric.NULLPTR
 
+# Every current NinjaEvalFlag value already has a UI setting (unlike MeshTree.tree_flags, where
+# only some known bits have one) - so any bit outside this mask is unrecognized and must be
+# preserved verbatim from obj["orig_eval_flags"] instead of being recomputed, or a no-edit export
+# would silently drop it.
+KNOWN_EVAL_FLAGS_MASK = 0
+for _f in NinjaEvalFlag:
+    KNOWN_EVAL_FLAGS_MASK |= _f.value
+
 
 def vertex_fmt_has_pos(fmt: int) -> bool:  # pyright: ignore[reportUnusedParameter]
     return True
@@ -652,6 +660,12 @@ def write_index_buffers(
     # paired a strip with the wrong texture.
     textures_by_material_name = {tex.material_name: tex for tex in textures}
     texture_id_base = texture_man.get_base_id()
+    # Written renderstate_args lists, keyed by their full content (not object identity) - a
+    # material with more than one strip (stripification can split one material's faces into
+    # several tristrips) legitimately produces the same args list more than once, and the original
+    # file shares a single copy across such containers via pointer reuse instead of writing a fresh
+    # one every time.
+    written_rs_args: dict[tuple[tuple[int, int, int, int], ...], tuple[int, int]] = {}
     for material_strip_data in material_strips:
         for strip in material_strip_data.strips:
             # Strips can be empty due to unused material slots, skip them
@@ -659,18 +673,27 @@ def write_index_buffers(
                 continue
             has_alpha = cast(bool, cast(ObjectWithRelSettings, obj).rel_settings.is_translucent) or has_vertex_alpha
             # Create render state args
-            first_rs_arg_ptr = NULLPTR
-            rs_args = material_strip_data.renderstate_args
+            # Copy, don't mutate material_strip_data.renderstate_args - it's shared by every strip
+            # of this material, and appending the per-strip TEXTURE_ID directly onto it would grow
+            # it further on every subsequent strip, corrupting every container after the first.
+            rs_args = list(material_strip_data.renderstate_args)
             tex = textures_by_material_name.get(material_strip_data.material_name)
             if tex is not None:
                 has_alpha = has_alpha or tex.has_alpha
                 rs_args += make_renderstate_args(
                     texture_id=tex.id - texture_id_base)
-            rs_arg_count = len(rs_args)
-            for rs_arg in rs_args:
-                ptr = destination.write(rs_arg)
-                if first_rs_arg_ptr == NULLPTR:
-                    first_rs_arg_ptr = ptr
+            rs_args_key = tuple((a.state_type, a.arg1, a.arg2, a.unk2) for a in rs_args)
+            cached = written_rs_args.get(rs_args_key)
+            if cached is not None:
+                first_rs_arg_ptr, rs_arg_count = cached
+            else:
+                first_rs_arg_ptr = NULLPTR
+                for rs_arg in rs_args:
+                    ptr = destination.write(rs_arg)
+                    if first_rs_arg_ptr == NULLPTR:
+                        first_rs_arg_ptr = ptr
+                rs_arg_count = len(rs_args)
+                written_rs_args[rs_args_key] = (first_rs_arg_ptr, rs_arg_count)
             # Write Indices
             buf_ptr = destination.write(IndexBuffer(indices=strip), True)
             container = IndexBufferContainer(
@@ -1138,11 +1161,19 @@ def get_or_build_animated_texture_image(xj_xvm: xvm.Xvm, tam_entry: "tam.TamEntr
     """
     xvrs_by_index = xj_xvm.xvrs
     content_key = hashlib.md5(str([kf.texture_index for kf in tam_entry.frames]).encode()).hexdigest()[:12]
-    # Namespaced by content hash, not just animation_id: get_image_sequence_images does an
-    # unfiltered directory listing sorted by numeric filename, so two animations' frames landing
+    # Namespaced by tex_id AND content hash, not just animation_id: get_image_sequence_images does
+    # an unfiltered directory listing sorted by numeric filename, so two animations' frames landing
     # in the same directory would silently merge into one bogus sequence - and animation_id
-    # numbering isn't guaranteed unique across a shared .xvm's several segment .tam files.
-    seq_dir_name = "tam_anim_{}_{}".format(tam_entry.animation_id, content_key)
+    # numbering isn't guaranteed unique across a shared .xvm's several segment .tam files. tex_id
+    # is needed too - confirmed on real map data (map_acity00, node "30_11_node_0") that the same
+    # tam_entry (one HAS_TEXTURE_ANIMATION mesh tree) can be reached by materials declaring
+    # DIFFERENT render-state TEXTURE_IDs (e.g. 7 and 8) for different faces/UV regions of that
+    # tree. Without tex_id in the key, both calls resolved to the same cache directory, so
+    # check_existing (below) returned the SAME Image datablock for both - and whichever call ran
+    # second silently overwrote the first's .name/pso_orig_tex_id, corrupting which original
+    # texture slot that face actually displays (verified: tex_id 7 and 8 are visually distinct
+    # textures on this map, not interchangeable, despite sharing one animation timeline).
+    seq_dir_name = "tam_anim_{}_tex{}_{}".format(tam_entry.animation_id, tex_id, content_key)
     cache_root = os.path.join(animated_texture_cache_root(xj_xvm.get_filename()), seq_dir_name)
     first_frame_path = os.path.join(cache_root, "0.png")
     try:
@@ -1169,6 +1200,9 @@ def get_or_build_animated_texture_image(xj_xvm: xvm.Xvm, tam_entry: "tam.TamEntr
         img["pso_orig_tex_id"] = tex_id
         if len(base_xvr.data) > 0:
             img.pixels = base_xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+            # Same undo-safety fix as the static-texture path above (see make_material) - this
+            # fallback also writes pixels directly into a non-packed Generated image.
+            img.pack()
         return img
 
     img = bpy.data.images.load(first_frame_path, check_existing=True)
@@ -1283,6 +1317,15 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
             if len(xvr.data) > 0:
                 # Why is the type of Image.pixels just "float"?? It should be list[float] or something. Anyway...
                 img.pixels = xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+                # Blender's Undo (memfile) system does not reliably preserve a non-packed
+                # "Generated"-source image's manually-written pixel buffer across an Undo+Redo
+                # cycle - confirmed via a live diagnostic (see
+                # pso-blender-external-tools/py/diagnose_black_materials.py): every texture
+                # imported this way came back with every pixel reset to solid black after a
+                # single Undo+Redo, while file-backed (SEQUENCE, animated) textures were
+                # unaffected. pack() makes Blender treat the pixel data as an owned, embedded
+                # blob (like a loaded-then-packed image), which IS correctly restored by Undo.
+                img.pack()
 
     # No existing material found, create a new one
     mat = bpy.data.materials.new(mat_name)
@@ -1685,7 +1728,14 @@ def xj_to_blender_mesh(name: str, root_node: XjMeshTreeNode, xvm: xvm.Xvm | None
             obj = xj_node_to_blender_mesh(name, node, node_counter, xvm, tam_entry)
             obj["mesh_offset"] = hex(node.mesh.get_offset())
         
-        cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(NinjaEvalFlag(x).name for x in util.get_set_bits(node.eval_flags))
+        # Bits outside the known NinjaEvalFlag enum would make NinjaEvalFlag(x) raise and abort
+        # the whole import - filter them out of the editable UI set, but stash the raw original
+        # value below so a no-edit export can still restore them (same principle as
+        # MeshTree.tree_flags' orig_tree_flags - see KNOWN_EVAL_FLAGS_MASK in n_rel.py/xj.py).
+        known_eval_flag_values = {f.value for f in NinjaEvalFlag}
+        cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags = set(
+            NinjaEvalFlag(x).name for x in util.get_set_bits(node.eval_flags) if x in known_eval_flag_values)
+        obj["orig_eval_flags"] = node.eval_flags
         obj["node_offset"] = hex(node.get_offset())
 
         collection.objects.link(obj)
@@ -1716,8 +1766,10 @@ def make_mesh_tree(njcm_chunk: IffChunk, siblings: list[bpy.types.Object], textu
         has_next = i < len(siblings) - 1
         has_children = len(obj.children) > 0
 
-        # Transform eval flags from blender format into actual bitfield
-        eval_flags = 0
+        # Transform eval flags from blender format into actual bitfield - start from any
+        # unrecognized bits preserved from the original file (see KNOWN_EVAL_FLAGS_MASK above),
+        # then OR in the known bits the UI actually exposes.
+        eval_flags = cast(int, obj.get("orig_eval_flags", 0)) & ~KNOWN_EVAL_FLAGS_MASK
         for flag_name in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
             eval_flags |= getattr(NinjaEvalFlag, flag_name).value
 
