@@ -30,6 +30,7 @@ from .xj_material_properties_menu import (
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 from .preferences_menu import PsoClearXvrCache, PsoBlenderAddonPreferences
 from .recent_rel_menu import ImportRecentRel, PSO_MT_import_rel_recent, PSO_PT_recent_rel
+from .bake_lighting_menu import BakeLightingToVertexColors, PSO_PT_bake_lighting
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -124,6 +125,8 @@ classes = [
     ImportRecentRel,
     PSO_MT_import_rel_recent,
     PSO_PT_recent_rel,
+    BakeLightingToVertexColors,
+    PSO_PT_bake_lighting,
     PSO_MT_import,
     PSO_MT_export
 ]
