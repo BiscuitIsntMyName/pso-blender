@@ -1268,11 +1268,10 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     # Keying on the full settings signature means identical (texture, render state) pairs still
     # share one material datablock, while genuinely different variants each get their own.
     #
-    # "Which material(s) use this texture" is answered separately (see
-    # XjSelectMaterialEverywhere in xj_material_properties_menu.py), by comparing the image
-    # datablock plugged into each material's texture node - not by material identity/name. That's
-    # what lets the user find every occurrence of a texture across the whole map regardless of
-    # which render-state variant it's using in each spot.
+    # "Which material(s) use this texture" is a separate question, answered by comparing the image
+    # datablock plugged into each material's texture node - not by material identity/name -
+    # letting a texture's every occurrence across the whole map be found regardless of which
+    # render-state variant it's using in each spot.
     if tex_id is not None and xj_xvm is not None:
         settings_signature = sorted(
             (s.state_type, s.arg1, s.arg2)
@@ -1405,13 +1404,30 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
     mix_node.blend_type = "MULTIPLY"
     cast(bpy.types.NodeSocketFloat, mix_node.inputs[0]).default_value = 1.0
 
-    # Texture Coordinate and Mapping nodes for clean UV input chain. mapping_node ends up being
-    # either a plain ShaderNodeMapping (no texture - see img is None below, nothing to key a
-    # shared group on) or a ShaderNodeGroup wrapping one shared Mapping node per texture (see
+    # UV Map and Mapping nodes for clean UV input chain. mapping_node ends up being either a plain
+    # ShaderNodeMapping (no texture - see img is None below, nothing to key a shared group on) or
+    # a ShaderNodeGroup wrapping one shared Mapping node per texture (see
     # get_or_create_mapping_node_group) - both expose "Vector" input/output sockets, which is all
     # the wiring below ever needs, so the rest of this function doesn't need to care which one it
     # got.
-    tex_coord_node = cast(bpy.types.ShaderNodeTexCoord, mat.node_tree.nodes.new(type="ShaderNodeTexCoord"))
+    #
+    # A ShaderNodeUVMap (left blank - "" means "the active render UV map", the exact same mesh
+    # data a ShaderNodeTexCoord's "UV" output would have read) is used here instead of
+    # ShaderNodeTexCoord specifically so the UV layer being read is visible and selectable
+    # directly in the node itself - a ShaderNodeTexCoord gives no such visibility at all, which
+    # cost real debugging time confirming which UV layer a given material was actually reading
+    # during this session's UV-layer-position investigation (see next_subjects_to_work.md - REL
+    # export always reads blender_mesh.uv_layers[0] by list position, independent of which layer
+    # any given material's nodes point to).
+    tex_coord_node = cast(bpy.types.ShaderNodeUVMap, mat.node_tree.nodes.new(type="ShaderNodeUVMap"))
+    # A material can be shared by many meshes (dedup by tex_id), and is built here before any of
+    # them exist as Blender objects yet, so there's no specific mesh to read a UV layer name off
+    # of - "UVMap" is hardcoded to match the one name every mesh actually gets, since every UV
+    # layer this addon's own importer ever creates goes through blender_mesh.uv_layers.new() with
+    # no name argument, which Blender always names "UVMap" for a mesh's first UV layer. Left blank
+    # this would still resolve to the same active UV layer at render time, but would visibly show
+    # as an empty, deceptively "not set up" field in the node itself instead.
+    tex_coord_node.uv_map = "UVMap"
     mapping_node: bpy.types.ShaderNodeMapping | bpy.types.ShaderNodeGroup
 
     # Blender's image texture node only has a single "Extension" setting shared by both U and V,
@@ -1469,38 +1485,39 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         pre_addr_u_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_u)
         pre_addr_v_node = make_texture_addressing_node(mat.node_tree, xj_settings.tex_addr_v)
 
-    # Organize nodes horizontally from left to right with ~300px spacing
-    # Texture chain (top row, Y = 300)
-    tex_coord_node.location = (-1500, 300)
-    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
-        pre_separate_uv_node.location = (-1200, 300)
-        pre_addr_u_node.location = (-900, 400)
-        pre_addr_v_node.location = (-900, 200)
-        pre_combine_uv_node.location = (-600, 300)
-    # The Mapping group and the Image group are the two nodes someone actually needs to Tab into
-    # to edit a texture (transform or swap the image) - placed right next to each other so both
-    # are one click away, with the per-variant post-fold addressing chain (not something you'd
-    # normally need to open) tucked underneath instead of visually sitting between them.
-    mapping_node.location = (-300, 300)
+    # Organize nodes horizontally from left to right with ~300px spacing. UV Map, Mapping and
+    # ImgGroup - the 3 nodes someone actually needs to open/edit to change a texture (swap the
+    # image, adjust its transform, or check/change which UV layer it reads) - sit on the center
+    # row (Y = 0), so they're the visually prominent ones. Everything else (vertex color, the
+    # alpha/transparency mix, the final BSDF/output chain - not something you'd normally need to
+    # touch) is pushed above (positive Y); the per-axis addressing math (even less often touched)
+    # is tucked below (negative Y). Blender doesn't persist a "default framing" per node tree, so
+    # this can't force the shader editor to open already centered on these 3 - positioning them
+    # centrally is as close to that as node placement alone can get.
+    # Center row (Y = 0): UV Map -> Mapping -> ImgGroup
+    tex_coord_node.location = (-1500, 0)
+    mapping_node.location = (-300, 0)
     if tex_node is not None:
-        tex_node.location = (0, 300)
+        tex_node.location = (0, 0)
+    # Per-axis addressing math, tucked below the center row (Y < 0)
+    if pre_separate_uv_node is not None and pre_combine_uv_node is not None and pre_addr_u_node is not None and pre_addr_v_node is not None:
+        pre_separate_uv_node.location = (-1200, -200)
+        pre_addr_u_node.location = (-900, -100)
+        pre_addr_v_node.location = (-900, -300)
+        pre_combine_uv_node.location = (-600, -200)
     if separate_uv_node is not None and combine_uv_node is not None and addr_u_node is not None and addr_v_node is not None:
-        separate_uv_node.location = (-300, 0)
-        addr_u_node.location = (-150, 100)
-        addr_v_node.location = (-150, -100)
-        combine_uv_node.location = (0, 0)
-    # Vertex color chain (bottom row, Y = -100)
-    vcol_node.location = (900, -100)
-    # Mix and alpha modulate (middle column, X = 1200)
-    mix_node.location = (1200, 100)
-    alpha_modulate_node.location = (1200, -200)
-    # BSDF and transparency (X = 1500)
-    bsdf_node.location = (1500, 100)
-    transparency_node.location = (1500, -200)
-    # Shader mix (X = 1800)
-    shader_mix_node.location = (1800, 0)
-    # Output (X = 2100)
-    output_node.location = (2100, 0)
+        separate_uv_node.location = (-300, -300)
+        addr_u_node.location = (-150, -200)
+        addr_v_node.location = (-150, -400)
+        combine_uv_node.location = (0, -300)
+    # Everything else, above the center row (Y > 0)
+    vcol_node.location = (900, 400)
+    mix_node.location = (1200, 600)
+    alpha_modulate_node.location = (1200, 300)
+    bsdf_node.location = (1500, 600)
+    transparency_node.location = (1500, 300)
+    shader_mix_node.location = (1800, 500)
+    output_node.location = (2100, 500)
 
     # Connect UV -> (per-axis wrap, native repeat) -> Mapping -> (per-axis wrap again, in case
     # Mapping pushed the already-folded coordinate back out of [0, 1)) -> Texture

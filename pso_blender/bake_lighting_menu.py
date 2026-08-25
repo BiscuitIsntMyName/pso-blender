@@ -65,7 +65,12 @@ def _simplify_material_for_bake(mat: Material) -> "_MaterialBakeRewire | None":
     nodes = mat.node_tree.nodes
     output_node = next((n for n in nodes if n.type == "OUTPUT_MATERIAL"), None)
     bsdf_node = next((n for n in nodes if n.type == "BSDF_DIFFUSE"), None)
-    tex_coord_node = next((n for n in nodes if n.type == "TEX_COORD"), None)
+    # UV_MAP: current materials (make_material now uses ShaderNodeUVMap instead of
+    # ShaderNodeTexCoord, so its UV layer is visible/selectable in the node itself - see xj.py).
+    # TEX_COORD: kept for materials generated before that change, already sitting in someone's
+    # .blend file - both node types expose the same "UV" output socket, so the rest of this
+    # function doesn't need to care which one it found.
+    tex_coord_node = next((n for n in nodes if n.type in ("UVMAP", "TEX_COORD")), None)
     if output_node is None or bsdf_node is None:
         return None
 
