@@ -22,10 +22,6 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     always_rendered: BoolProperty(name="Always rendered", description="Object will not be affected by view distance and will always be rendered.", default=False)
     is_stencil_viewer: BoolProperty(name="Stencil viewer", description="Stenciled objects will be visible when rendered behind this object.", default=False)
     is_stenciled: BoolProperty(name="Stenciled", description="Object will only be visible when rendered behind a stencil viewer", default=False)
-    exclude_from_lighting_bake: BoolProperty(
-        name="Exclude from lighting bake",
-        description="Skip this object when running 'Bake Rendered Lights' - its vertex colors will not be overwritten",
-        default=False)
 
 
 class ObjectWithRelSettings(bpy.types.Object):
@@ -168,4 +164,3 @@ class MeshRelSettingsPanel(Panel):
             settings = cast(ObjectWithRelSettings, context.object).rel_settings
             self.layout.prop(settings, "is_chunk")
             self.layout.prop(settings, "always_rendered")
-            self.layout.prop(settings, "exclude_from_lighting_bake")

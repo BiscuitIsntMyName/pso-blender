@@ -29,8 +29,12 @@ from .xj_material_properties_menu import (
 from .njcm_node_properties_menu import NjcmNodeSettings, NjcmNodeSettingsPanel
 from .preferences_menu import PsoClearXvrCache, PsoBlenderAddonPreferences
 from .recent_rel_menu import ImportRecentRel, PSO_MT_import_rel_recent, PSO_PT_recent_rel
-from .bake_lighting_menu import BakeLightingToVertexColors, PSO_PT_bake_lighting
-from .decal_prep_menu import PreparePolygonDecal, PSO_PT_decal_prep
+from .bake_lighting_menu import (
+    BatchBakeDecals,
+    PSO_PT_bake_lighting,
+    register_scene_properties as register_bake_scene_properties,
+    unregister_scene_properties as unregister_bake_scene_properties)
+from .decal_prep_menu import BatchPrepareDecalsForScene
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -124,10 +128,9 @@ classes = [
     ImportRecentRel,
     PSO_MT_import_rel_recent,
     PSO_PT_recent_rel,
-    BakeLightingToVertexColors,
+    BatchPrepareDecalsForScene,
+    BatchBakeDecals,
     PSO_PT_bake_lighting,
-    PreparePolygonDecal,
-    PSO_PT_decal_prep,
     PSO_MT_import,
     PSO_MT_export
 ]
@@ -152,6 +155,8 @@ def register():
     # Add settings to materials
     material_as_any = cast(Any, bpy.types.Material)
     material_as_any.xj_settings = PointerProperty(type=XjMaterialSettings)
+    # Add settings to scenes
+    register_bake_scene_properties()
     # Add hooks
     load_post.append(convert_legacy_properties)
 
@@ -168,4 +173,5 @@ def unregister():
     del cast(Any, bpy.types.Object).rel_settings
     del cast(Any, bpy.types.Object).njcm_settings
     del cast(Any, bpy.types.Material).xj_settings
+    unregister_bake_scene_properties()
     load_post.remove(convert_legacy_properties)

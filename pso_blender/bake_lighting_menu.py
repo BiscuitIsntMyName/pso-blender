@@ -1,127 +1,184 @@
-from typing import cast, final
+from typing import Any, cast, final
 import bpy
-from bpy.types import Context, Material, Node, NodeSocket, Operator, Panel
-from .rel_properties_menu import ObjectWithRelSettings
+from bpy.props import BoolProperty  # pyright: ignore[reportUnknownVariableType]
+from bpy.types import Context, Material, Operator, Panel
+from .decal_prep_menu import BatchPrepareDecalsForScene
 from .util import find_diffuse_image
 
 
-class _MaterialBakeRewire:
-    __slots__ = ("material", "surface_from", "color_from", "temp_image_node")
-
-    def __init__(
-            self, material: Material, surface_from: "NodeSocket | None", color_from: "NodeSocket | None",
-            temp_image_node: "Node | None"):
-        self.material = material
-        self.surface_from = surface_from
-        self.color_from = color_from
-        self.temp_image_node = temp_image_node
+_image_has_real_alpha_cache: dict[str, bool] = {}
 
 
-def _simplify_material_for_bake(mat: Material) -> "_MaterialBakeRewire | None":
-    """Temporarily rewires a pso-blender-generated material so a Cycles lighting bake reads
-    through it correctly - see caller for why this is needed. Returns None (nothing rewired,
-    nothing to restore) if the material doesn't have the expected node shape (e.g. a user-made
-    material this addon didn't generate) rather than guessing at an unfamiliar graph.
+def _image_has_real_alpha(image: "bpy.types.Image | None") -> bool:
+    """True if any pixel's alpha is below 1.0 - i.e. this image is actually used for real
+    transparency somewhere, not just nominally having an alpha channel. Cached by image name
+    (mirrors Texture.has_alpha's cache in util.py) since scanning every pixel of every material's
+    image on every bake would otherwise be repeated needlessly."""
+    if image is None:
+        return False
+    cached = _image_has_real_alpha_cache.get(image.name)
+    if cached is not None:
+        return cached
+    pixels = image.pixels[:]  # pyright: ignore[reportArgumentType]
+    result = any(pixels[i] < 1.0 for i in range(3, len(pixels), 4))
+    _image_has_real_alpha_cache[image.name] = result
+    return result
 
-    Three independent Cycles bake problems, all confirmed live against real pso-blender materials
-    (none reproducible on a plain material with a bare Image Texture node wired straight into a
-    Diffuse BSDF):
 
-    1. This addon's per-axis UV addressing math (see make_material, xj.py - Separate XYZ -> one
-       Math node per axis for independent WRAP/CLAMP/MIRROR -> Combine XYZ, needed since Blender's
-       Image Texture node only has one "Extension" setting shared by both axes), and the shared
-       Mapping node group upstream of it, make Cycles bake come back all-zero for anything
-       downstream. Rendering (including EEVEE/Cycles viewport preview) is unaffected - this is
-       specific to the bake operator.
-    2. `make_material` always multiplies the texture color by the mesh's EXISTING
-       "vertex_color" attribute before feeding the Diffuse BSDF (`mix_node`, MULTIPLY blend,
-       Fac=1.0 - see xj.py around the `mix_node.outputs[2] -> bsdf_node.inputs[0]` link) - this is
-       what makes painted vertex color visibly darken/tint the texture in the viewport. But it
-       also means a lighting bake is circular: it reads a Color input that already depends on the
-       very same "vertex_color" attribute the bake is about to overwrite. On a mesh whose existing
-       vertex color is black (the common case - either never painted, or already dark), the BSDF
-       Color input is black regardless of scene lighting, so every bake comes back black too, no
-       matter how bright the scene is.
-    3. The Transparent/Diffuse Mix Shader wiring (for texture alpha) makes the baked vertex
-       color's alpha channel come back 0 instead of 1. A lighting bake has nothing to do with
-       transparency, so this branch is irrelevant to it anyway.
+def _mesh_has_real_vertex_alpha(mesh: bpy.types.Mesh) -> bool:
+    """True if the mesh's "vertex_color" attribute has any alpha below 1.0 anywhere - vertex
+    color alpha is multiplied with texture alpha to drive the Mix Shader's Diffuse/Transparent
+    blend (see make_material, xj.py), so this is just as capable of real transparency as the
+    texture's own alpha channel is."""
+    vc = mesh.color_attributes.get("vertex_color")
+    if vc is None:
+        return False
+    return any(d.color[3] < 1.0 for d in vc.data)
 
-    All three are worked around the same way: for the duration of the bake, the Diffuse BSDF's
-    Color input is fed directly from a plain, temporary Image Texture node (raw UV in, "Repeat"
-    extension - the addon's shared ImgGroup/Mapping node group and the vertex-color multiply are
-    both skipped entirely), found via find_diffuse_image (same helper the rest of the addon uses
-    to locate "the" diffuse image of a material, whether it sits directly in the material or one
-    level inside a shared ImgGroup). If the material has no diffuse image at all (untextured slot),
-    the Color input is simply left at its own default value instead. Either way the BSDF is then
-    wired straight to Output Surface, bypassing the Mix Shader/Transparent branch too.
 
-    Bypassing the addressing math this way only matters for meshes whose UV coordinates actually
-    leave [0, 1) (tiled/repeating textures) - within [0, 1) "Repeat" and the addon's own
-    WRAP/CLAMP/MIRROR math agree anyway, so a lighting bake is visually unaffected by skipping it
-    for the vast majority of meshes.
+def _object_is_fully_opaque(obj: bpy.types.Object) -> bool:
+    """True only if EVERY material on this object has fully-opaque texture alpha, AND the mesh's
+    own vertex color alpha (if any) is fully opaque too - i.e. genuinely safe to bypass the
+    Transparent BSDF branch on this object without changing anything that's meant to actually be
+    see-through (windows, cutout foliage, etc.)."""
+    mesh = cast(bpy.types.Mesh, obj.data)
+    if _mesh_has_real_vertex_alpha(mesh):
+        return False
+    for slot in obj.material_slots:
+        mat = slot.material
+        if mat is None or mat.node_tree is None:
+            continue
+        if _image_has_real_alpha(find_diffuse_image(mat)):
+            return False
+    return True
+
+
+def _iter_opaque_scene_materials(scene: bpy.types.Scene, exclude: "set[bpy.types.Object]"):
+    """Yields each distinct material (no duplicates - materials are frequently shared across many
+    objects in this addon's output) on a fully-opaque mesh object in the scene, skipping objects
+    in `exclude` (typically the bake's own target(s), left untouched by design)."""
+    seen_materials: set[Material] = set()
+    for obj in scene.objects:
+        if obj.type != "MESH" or obj in exclude or not _object_is_fully_opaque(obj):
+            continue
+        for slot in obj.material_slots:
+            mat = slot.material
+            if mat is None or mat.node_tree is None or mat in seen_materials:
+                continue
+            seen_materials.add(mat)
+            yield mat
+
+
+def _bypass_opaque_scene_objects(scene: bpy.types.Scene, exclude: "set[bpy.types.Object]") -> int:
+    """Bypasses the Transparent/Diffuse Mix Shader (wires the Diffuse BSDF straight to Output
+    Surface) on every fully-opaque mesh's material in the scene except `exclude` - so surrounding
+    geometry casts correct shadows and bounces correct indirect light during a bake. Confirmed
+    live that a Mix Shader driven by a dynamically-computed Fac (even one that always evaluates to
+    1.0 - fully opaque) makes Cycles treat the object as needing "transparent shadow" handling,
+    which behaves inconsistently during a bake and can leak light through walls that should fully
+    block it. Only touches materials _object_is_fully_opaque already confirmed have no real
+    transparency to lose by skipping that branch.
+
+    Deliberately stateless: doesn't return or need anything to be undone later - see
+    _restore_opaque_scene_objects, which re-derives the correct wiring directly from the material's
+    own Mix Shader node rather than remembering what was there before. This is what makes an ON/OFF
+    checkbox safe to use instead of relying on Blender's Undo (survives a file save/reload, or the
+    two calls being made from different Blender sessions entirely).
+
+    Returns how many distinct materials were touched.
     """
-    if mat.node_tree is None:
-        return None
-    nodes = mat.node_tree.nodes
-    output_node = next((n for n in nodes if n.type == "OUTPUT_MATERIAL"), None)
-    bsdf_node = next((n for n in nodes if n.type == "BSDF_DIFFUSE"), None)
-    # UV_MAP: current materials (make_material now uses ShaderNodeUVMap instead of
-    # ShaderNodeTexCoord, so its UV layer is visible/selectable in the node itself - see xj.py).
-    # TEX_COORD: kept for materials generated before that change, already sitting in someone's
-    # .blend file - both node types expose the same "UV" output socket, so the rest of this
-    # function doesn't need to care which one it found.
-    tex_coord_node = next((n for n in nodes if n.type in ("UVMAP", "TEX_COORD")), None)
-    if output_node is None or bsdf_node is None:
-        return None
-
-    surface_input = output_node.inputs.get("Surface")
-    surface_from = surface_input.links[0].from_socket if surface_input and surface_input.is_linked else None
-    color_input = bsdf_node.inputs.get("Color")
-    color_from = color_input.links[0].from_socket if color_input and color_input.is_linked else None
-
-    temp_image_node: "Node | None" = None
-    if color_input is not None:
-        diffuse_image = find_diffuse_image(mat)
-        if diffuse_image is not None and tex_coord_node is not None:
-            temp_image_node = mat.node_tree.nodes.new(type="ShaderNodeTexImage")
-            cast(bpy.types.ShaderNodeTexImage, temp_image_node).image = diffuse_image
-            mat.node_tree.links.new(tex_coord_node.outputs["UV"], temp_image_node.inputs["Vector"])
-            mat.node_tree.links.new(temp_image_node.outputs["Color"], color_input)
-        elif color_input.is_linked:
-            mat.node_tree.links.remove(color_input.links[0])
-
-    if surface_input is not None:
-        mat.node_tree.links.new(bsdf_node.outputs["BSDF"], surface_input)
-    return _MaterialBakeRewire(mat, surface_from, color_from, temp_image_node)
-
-
-def _restore_material_after_bake(rewire: "_MaterialBakeRewire | None"):
-    if rewire is None or rewire.material.node_tree is None:
-        return
-    tree = rewire.material.node_tree
-    output_node = next((n for n in tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
-    bsdf_node = next((n for n in tree.nodes if n.type == "BSDF_DIFFUSE"), None)
-    if output_node is not None and rewire.surface_from is not None:
+    count = 0
+    for mat in _iter_opaque_scene_materials(scene, exclude):
+        nodes = mat.node_tree.nodes  # pyright: ignore[reportOptionalMemberAccess]
+        output_node = next((n for n in nodes if n.type == "OUTPUT_MATERIAL"), None)
+        bsdf_node = next((n for n in nodes if n.type == "BSDF_DIFFUSE"), None)
+        if output_node is None or bsdf_node is None:
+            continue
         surface_input = output_node.inputs.get("Surface")
         if surface_input is not None:
-            tree.links.new(rewire.surface_from, surface_input)
-    if bsdf_node is not None:
-        color_input = bsdf_node.inputs.get("Color")
-        if color_input is not None and rewire.color_from is not None:
-            tree.links.new(rewire.color_from, color_input)
-    if rewire.temp_image_node is not None:
-        tree.nodes.remove(rewire.temp_image_node)
+            mat.node_tree.links.new(bsdf_node.outputs["BSDF"], surface_input)  # pyright: ignore[reportOptionalMemberAccess]
+            count += 1
+    return count
 
 
-# pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
+def _restore_opaque_scene_objects(scene: bpy.types.Scene, exclude: "set[bpy.types.Object]") -> int:
+    """Re-links each fully-opaque mesh's material back through its Mix Shader (Mix Shader ->
+    Output Surface) - the standard wiring make_material always builds, found directly by node
+    type rather than by remembering what _bypass_opaque_scene_objects saw. Safe to call even if
+    nothing was actually bypassed (relinking an already-correct link is a harmless no-op).
+
+    Returns how many distinct materials were touched.
+    """
+    count = 0
+    for mat in _iter_opaque_scene_materials(scene, exclude):
+        nodes = mat.node_tree.nodes  # pyright: ignore[reportOptionalMemberAccess]
+        output_node = next((n for n in nodes if n.type == "OUTPUT_MATERIAL"), None)
+        mix_shader_node = next((n for n in nodes if n.type == "MIX_SHADER"), None)
+        if output_node is None or mix_shader_node is None:
+            continue
+        surface_input = output_node.inputs.get("Surface")
+        if surface_input is not None:
+            mat.node_tree.links.new(mix_shader_node.outputs[0], surface_input)  # pyright: ignore[reportOptionalMemberAccess]
+            count += 1
+    return count
+
+
+def _update_bypass_transparent_shadows(self: bpy.types.Scene, _context: Context):
+    scene = self
+    if cast(bool, scene.pso_bypass_transparent_shadows):
+        _bypass_opaque_scene_objects(scene, exclude=set())
+    else:
+        _restore_opaque_scene_objects(scene, exclude=set())
+
+
+class SceneWithBypassTransparentShadows(bpy.types.Scene):
+    pso_bypass_transparent_shadows: bool
+
+
+def register_scene_properties():
+    # A bare property on bpy.types.Scene (like rel_settings/xj_settings elsewhere in this addon,
+    # but a plain BoolProperty rather than a whole PropertyGroup - this is the only setting here)
+    # instead of an Operator, so it behaves as a real ON/OFF checkbox: toggling it off calls
+    # _restore_opaque_scene_objects immediately via `update`, no separate action needed.
+    cast(Any, bpy.types.Scene).pso_bypass_transparent_shadows = BoolProperty(
+        name="Bypass Transparent Shadows For Bake",
+        description=(
+            "While on, every fully-opaque mesh's material has its Transparent/Diffuse Mix Shader "
+            "bypassed, so Cycles casts correct shadows and bounces correct indirect light during "
+            "a manual bake (Render Properties > Bake) - e.g. the dedicated-texture-decal workflow, "
+            "which doesn't go through any pso-blender bake operator. Turn back off once done "
+            "baking to restore normal transparency handling"),
+        default=False,
+        update=_update_bypass_transparent_shadows)
+
+
+def unregister_scene_properties():
+    del cast(Any, bpy.types.Scene).pso_bypass_transparent_shadows
+
+
 @final
-class BakeLightingToVertexColors(Operator):  # pyright: ignore[reportIncompatibleMethodOverride]
-    "Bake the scene's current lighting (Cycles, Combined - diffuse+glossy, direct+indirect) into each selected mesh object's vertex color, so the existing REL/XJ export picks it up automatically without any new export-side code"
+class BatchBakeDecals(Operator):  # pyright: ignore[reportIncompatibleMethodOverride]
+    """Bakes every decal object created by BatchPrepareDecalsForScene (decal_prep_menu.py) - found
+    by the "pso_is_decal" custom property that operator tags them with, not by selection, so this
+    can run as its own separate step afterward without needing to be chained in one call. Each
+    object's material has two Image Texture nodes (see _separate_and_build_decal): a reference to
+    the original texture feeding Base Color, and "PSO_DecalBakeTarget" - a brand new blank image,
+    the actual bake destination. Cycles bakes into whichever node is active AND selected, so this
+    finds "PSO_DecalBakeTarget" by name and makes it so for each object in turn.
 
+    Temporarily turns on scene.pso_bypass_transparent_shadows (bake_lighting_menu.py) for every
+    fully-opaque surrounding object, restoring it to whatever it was before once done - confirmed
+    live this session that Cycles otherwise miscomputes shadows/indirect light from this addon's
+    materials during any bake, not just the object actually being baked.
+    """
 
-    bl_idname = "object.pso_bake_lighting_to_vertex_colors"
-    bl_label = "Bake Rendered Lights"
+    bl_idname = "object.pso_batch_bake_decals"
+    bl_label = "Bake All Decals"
     bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context: Context):
+        return context.scene is not None
 
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         scene = context.scene
@@ -129,18 +186,11 @@ class BakeLightingToVertexColors(Operator):  # pyright: ignore[reportIncompatibl
             self.report({"ERROR"}, "No active scene")
             return {"CANCELLED"}
 
-        selected_meshes = [obj for obj in context.selected_objects if obj.type == "MESH"]
-        targets = [obj for obj in selected_meshes if not cast(ObjectWithRelSettings, obj).rel_settings.exclude_from_lighting_bake]
-        skipped_excluded = len(selected_meshes) - len(targets)
-        skipped_non_mesh = len(context.selected_objects) - len(selected_meshes)
-
+        targets = [o for o in scene.objects if o.type == "MESH" and o.get("pso_is_decal")]
         if not targets:
-            self.report({"WARNING"}, "No mesh objects to bake (selection is empty, non-mesh only, or all excluded)")
+            self.report({"WARNING"}, "No decal objects found - run 'Prepare Selection As Decals' first")
             return {"CANCELLED"}
 
-        # Save every scene setting this touches, same discipline as xvm.bake_texture_group - baking
-        # lighting must never leave the user's actual file in a different state than before this
-        # operator ran.
         original_engine = scene.render.engine
         original_view_transform = scene.view_settings.view_transform
         original_bake_target = scene.render.bake.target
@@ -150,66 +200,37 @@ class BakeLightingToVertexColors(Operator):  # pyright: ignore[reportIncompatibl
         original_use_pass_glossy = scene.render.bake.use_pass_glossy
         original_selected = list(context.selected_objects)
         original_active = context.view_layer.objects.active if context.view_layer else None
+        original_bypass = cast(bool, scene.pso_bypass_transparent_shadows)
+
+        # Deliberately no wm.progress_begin/update/end wrapping here, unlike
+        # BatchPrepareDecalsForScene - bpy.ops.object.bake() already shows its own native
+        # per-bake progress in the status bar while it runs (confirmed by the user), and taking
+        # over the cursor's progress indicator for the whole batch hid that instead of helping.
 
         baked_count = 0
+        failed_count = 0
         try:
             scene.render.engine = "CYCLES"
             scene.view_settings.view_transform = "Standard"
-            # Confirmed live: bpy.ops.object.bake() bakes to an Image Texture node by default
-            # regardless of whether one is actually wired in (silently produces an all-white/
-            # unchanged result if it can't find one) - render.bake.target must be explicitly set
-            # to "VERTEX_COLORS" or nothing meaningful gets written at all.
-            scene.render.bake.target = "VERTEX_COLORS"
+            scene.render.bake.target = "IMAGE_TEXTURES"
             scene.render.bake.use_pass_direct = True
             scene.render.bake.use_pass_indirect = True
             scene.render.bake.use_pass_diffuse = True
             scene.render.bake.use_pass_glossy = True
+            if not original_bypass:
+                scene.pso_bypass_transparent_shadows = True
 
             for obj in targets:
-                mesh = cast(bpy.types.Mesh, obj.data)
-
-                # Ensure "vertex_color" exists, matching xj.py's importer exactly (the same name/
-                # domain/type it creates on import), and make it the ACTIVE color attribute -
-                # confirmed live that Cycles bakes into whichever attribute is active, independent
-                # of its position in the list.
-                attr = next((a for a in mesh.color_attributes if a.name == "vertex_color"), None)
-                if attr is None:
-                    attr = mesh.color_attributes.new("vertex_color", "FLOAT_COLOR", "POINT")
-                attr_index = next(i for i, a in enumerate(mesh.color_attributes) if a.name == attr.name)
-                mesh.color_attributes.active_color_index = attr_index
-                if attr_index != 0:
-                    # xj.py's exporter reads color_attributes[0] by list position, not by name or
-                    # active status - baking correctly into "vertex_color" here doesn't help if
-                    # some OTHER attribute still occupies index 0, since export would keep reading
-                    # that other one instead. No safe reorder API exists without rebuilding the
-                    # mesh, so surface it instead of silently doing the wrong thing.
-                    self.report({"WARNING"}, (
-                        "'{}': baked into 'vertex_color' but it isn't the first color attribute "
-                        "on this mesh - export reads the first one, so this bake won't be picked "
-                        "up until the other attribute is removed or moved after it."
-                    ).format(obj.name))
-
-                # An active Image Texture node in the object's own material(s) could in principle
-                # compete for the bake target - defensively clear it. pso-blender's own generated
-                # materials keep their diffuse image nested inside a shared ImgGroup node group,
-                # never at the top level, so this shouldn't normally trigger - only relevant for a
-                # user-added top-level image node.
-                original_active_nodes: list[tuple[bpy.types.Material, "bpy.types.Node | None"]] = []
-                # Temporarily bypass this addon's per-axis UV addressing math and the Transparent/
-                # Diffuse Mix Shader - see _simplify_material_for_bake's docstring for the two
-                # confirmed Cycles bake bugs this works around. Only rewires materials whose node
-                # shape matches what this addon generates; anything else (a user-authored
-                # material) is left completely untouched, both for baking and restoration.
-                rewires: list["_MaterialBakeRewire | None"] = []
-                seen_materials: set[Material] = set()
-                for slot in obj.material_slots:
-                    mat = slot.material
-                    if mat is None or mat.node_tree is None or mat in seen_materials:
-                        continue
-                    seen_materials.add(mat)
-                    original_active_nodes.append((mat, mat.node_tree.nodes.active))
-                    mat.node_tree.nodes.active = None
-                    rewires.append(_simplify_material_for_bake(mat))
+                mat = obj.active_material
+                if mat is None or mat.node_tree is None:
+                    failed_count += 1
+                    self.report({"WARNING"}, "'{}': no material to bake into".format(obj.name))
+                    continue
+                target_node = mat.node_tree.nodes.get("PSO_DecalBakeTarget")
+                if target_node is None:
+                    failed_count += 1
+                    self.report({"WARNING"}, "'{}': no PSO_DecalBakeTarget node found on its material".format(obj.name))
+                    continue
 
                 for o in context.selected_objects:
                     o.select_set(False)
@@ -217,17 +238,43 @@ class BakeLightingToVertexColors(Operator):  # pyright: ignore[reportIncompatibl
                 if context.view_layer:
                     context.view_layer.objects.active = obj
 
+                # Setting nodes.active clears every node's .select, including the one just made
+                # active - confirmed live this session - so active must be set BEFORE select, with
+                # select the very last thing touched before the bake call itself.
+                mat.node_tree.nodes.active = target_node
+                for n in mat.node_tree.nodes:
+                    n.select = False
+                target_node.select = True
+
                 try:
                     bpy.ops.object.bake(type="COMBINED")
                     baked_count += 1
                 except RuntimeError as e:
+                    failed_count += 1
                     self.report({"ERROR"}, "'{}': bake failed - {}".format(obj.name, e))
-                finally:
-                    for rewire in rewires:
-                        _restore_material_after_bake(rewire)
-                    for mat, active_node in original_active_nodes:
-                        mat.node_tree.nodes.active = active_node
+                    continue
+
+                # PSO_DecalBakeTarget is deliberately NOT wired to Base Color before this point -
+                # Cycles bakes into whichever node is active+selected regardless of whether it's
+                # actually connected to anything, and it mustn't feed Base Color during the bake
+                # itself (that would make the bake read its own blank output). Now that baking is
+                # done, THIS is what the material should actually show/export going forward - wire
+                # it in for real, and remove the original-texture reference (PSO_OriginalTexture
+                # Reference + its UV Map node), now unused, so find_diffuse_image (util.py) has
+                # only one TEX_IMAGE node left to find instead of picking between two arbitrarily.
+                bsdf_node = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+                if bsdf_node is not None:
+                    mat.node_tree.links.new(target_node.outputs["Color"], bsdf_node.inputs["Base Color"])
+                reference_node = mat.node_tree.nodes.get("PSO_OriginalTextureReference")
+                if reference_node is not None:
+                    vector_input = reference_node.inputs.get("Vector")
+                    reference_uv_node = vector_input.links[0].from_node if vector_input and vector_input.is_linked else None
+                    mat.node_tree.nodes.remove(reference_node)
+                    if reference_uv_node is not None:
+                        mat.node_tree.nodes.remove(reference_uv_node)
         finally:
+            if not original_bypass:
+                scene.pso_bypass_transparent_shadows = False
             scene.render.engine = original_engine
             scene.view_settings.view_transform = original_view_transform
             scene.render.bake.target = original_bake_target
@@ -238,25 +285,35 @@ class BakeLightingToVertexColors(Operator):  # pyright: ignore[reportIncompatibl
             for o in context.selected_objects:
                 o.select_set(False)
             for o in original_selected:
-                o.select_set(True)
-            if context.view_layer:
+                if o.name in bpy.data.objects:
+                    o.select_set(True)
+            if context.view_layer and original_active is not None and original_active.name in bpy.data.objects:
                 context.view_layer.objects.active = original_active
 
-        self.report({"INFO"}, "Baked lighting into vertex colors for {} object(s); skipped {} excluded, {} non-mesh".format(
-            baked_count, skipped_excluded, skipped_non_mesh))
+        self.report({"INFO"}, "Baked {} decal object(s); {} failed".format(baked_count, failed_count))
         return {"FINISHED"}
 
 
 @final
 class PSO_PT_bake_lighting(Panel):  # pyright: ignore[reportIncompatibleMethodOverride]
+    """Everything from this session's dedicated-texture-decal + lighting-bake exploration, kept
+    together under one clearly-marked "Experimental" section - the whole approach is slow (a real
+    Cycles bake per decal object) and its outcome is still under evaluation, not yet a settled
+    part of the addon's normal workflow."""
+
     bl_idname = "PSO_PT_bake_lighting"
-    bl_label = "Lighting Bake"
+    bl_label = "Bake Cycle Lights (Experimental)"
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "pso-blender"
 
     def draw(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         layout = self.layout
-        if not layout:
+        if not layout or context.scene is None:
             return
-        layout.operator(BakeLightingToVertexColors.bl_idname, icon="RENDER_STILL")
+        layout.operator(BatchPrepareDecalsForScene.bl_idname, icon="MOD_UVPROJECT")
+        layout.separator()
+        layout.prop(
+            cast(SceneWithBypassTransparentShadows, context.scene), "pso_bypass_transparent_shadows",
+            text="Bypass Transparent Shadows For Bake", icon="MOD_MASK")
+        layout.operator(BatchBakeDecals.bl_idname, icon="RENDER_STILL")
