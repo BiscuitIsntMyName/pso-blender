@@ -410,6 +410,7 @@ class XjSendAssetPackToImgGroup(bpy.types.Operator):
 
         normal_image, metal_image = util.find_material_normal_and_metal_images(source_mat)
         roughness_image = util.find_material_roughness_image(source_mat)
+        displacement_image = util.find_material_displacement_image(source_mat)
 
         resolved = _resolve_target_imggroup(context)
         if isinstance(resolved, str):
@@ -419,11 +420,14 @@ class XjSendAssetPackToImgGroup(bpy.types.Operator):
 
         tex_image_node.image = diffuse_image
         from . import xj
-        xj._wire_relief_composite(group_tree, tex_image_node, normal_image, metal_image, roughness_image)  # pyright: ignore[reportPrivateUsage]
+        xj._wire_relief_composite(  # pyright: ignore[reportPrivateUsage]
+            group_tree, tex_image_node, normal_image, metal_image, roughness_image, displacement_image)
 
         settings = cast(MaterialWithXjSettings, target_mat).xj_settings
-        if normal_image is None and metal_image is None:
-            self.report({"WARNING"}, "'{}' has no normal or metal map - sent the diffuse image as-is".format(asset.name))
+        if normal_image is None and metal_image is None and displacement_image is None:
+            self.report({"WARNING"}, "'{}' has no normal, metal, or displacement map - sent the diffuse image as-is".format(asset.name))
+        elif displacement_image is not None:
+            self.report({"INFO"}, "Sent '{}' to PSO texture id {} ('{}'), with relief composited live and a real displacement map available".format(asset.name, settings.pso_id, target_mat.name))
         else:
             self.report({"INFO"}, "Sent '{}' to PSO texture id {} ('{}'), with relief composited live".format(asset.name, settings.pso_id, target_mat.name))
         return {"FINISHED"}

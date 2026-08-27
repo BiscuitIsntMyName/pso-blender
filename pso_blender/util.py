@@ -359,6 +359,34 @@ def find_material_normal_and_metal_images(mat: bpy.types.Material) -> tuple["bpy
     return (normal_image, metal_image)
 
 
+def find_material_displacement_image(mat: bpy.types.Material) -> "bpy.types.Image | None":
+    """The Displacement (true height, not a normal map's derived slope) image of an arbitrary,
+    foreign PBR material, if any - e.g. Poly Haven materials routinely ship a dedicated "disp" map
+    wired into a Displacement node feeding Material Output's Displacement socket, entirely separate
+    from the Normal Map wired into the Principled BSDF (found by find_material_normal_and_metal_
+    images instead). Expects Material Output's Displacement input to be linked to a
+    ShaderNodeDisplacement, whose Height input is in turn linked to an Image Texture - the standard
+    way this is wired regardless of which addon/library built the graph."""
+    if mat.node_tree is None:
+        return None
+    output_node = next((n for n in mat.node_tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
+    if output_node is None:
+        return None
+    displacement_input = cast(bpy.types.ShaderNodeOutputMaterial, output_node).inputs.get("Displacement")
+    if displacement_input is None or not displacement_input.is_linked:
+        return None
+    displacement_node = displacement_input.links[0].from_node
+    if displacement_node.type != "DISPLACEMENT":
+        return None
+    height_input = cast(bpy.types.ShaderNodeDisplacement, displacement_node).inputs.get("Height")
+    if height_input is None or not height_input.is_linked:
+        return None
+    tex_node = height_input.links[0].from_node
+    if tex_node.type == "TEX_IMAGE":
+        return cast(bpy.types.ShaderNodeTexImage, tex_node).image
+    return None
+
+
 def find_material_roughness_image(mat: bpy.types.Material) -> "bpy.types.Image | None":
     """The Roughness image of an arbitrary, foreign PBR material, if any - same graph-walking
     pattern as find_material_normal_and_metal_images (kept separate rather than folded in there,

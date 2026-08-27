@@ -1,4 +1,5 @@
 __pycache__
+.~stale~*
 .vscode
 pso_blender.zip
 pyvenv.cfg

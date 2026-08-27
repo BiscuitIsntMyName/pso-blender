@@ -913,7 +913,7 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: "int | str", img
 # Relief-composite node names, shared between _wire_relief_composite (build/teardown) and
 # xvm.bake_texture_group (detects "has this group been customized" by checking whether the
 # group's Color output is still directly linked to PSO_Diffuse, or fed through nodes like these).
-_RELIEF_IMAGE_NODE_NAMES = ("PSO_Normal", "PSO_Metal", "PSO_Roughness")
+_RELIEF_IMAGE_NODE_NAMES = ("PSO_Normal", "PSO_Metal", "PSO_Roughness", "PSO_Height")
 _RELIEF_NODE_PREFIX = "PSO_Relief_"
 
 
@@ -923,6 +923,7 @@ def _wire_relief_composite(
     normal_image: "bpy.types.Image | None",
     metal_image: "bpy.types.Image | None",
     roughness_image: "bpy.types.Image | None" = None,
+    height_image: "bpy.types.Image | None" = None,
 ) -> None:
     """(Re)builds the shared texture group's internal Color pipeline to optionally composite a
     normal map's relief and/or a metal map's low-diffuse-response cue directly into the diffuse
@@ -935,6 +936,14 @@ def _wire_relief_composite(
     different physical property): rough/matte areas show the full relief darkening, smooth areas
     are pulled back toward neutral (no darkening) - a fake "occlusion" cue makes little sense on a
     mirror-smooth surface. Has no effect if normal_image is None (nothing to modulate).
+
+    height_image, if present, is a genuine displacement/height map (as opposed to normal_image's
+    derived-from-slope approximation) - e.g. Poly Haven materials routinely ship one separately
+    from their normal map (see util.find_material_displacement_image). Deliberately NOT wired into
+    the darkening formula below at all - just stored as a "PSO_Height" node in the group tree (same
+    convention as PSO_Normal/PSO_Metal/PSO_Roughness) so relief_displace_menu.py can find and
+    prefer it as a more accurate height source than deriving one from PSO_Normal's blue channel.
+    Independent of normal_image/metal_image - stored even if both of those are None.
 
     Always tears down and rebuilds from scratch (removing any node from a previous call, found by
     name) rather than trying to patch existing wiring incrementally - simpler, and avoids leftover
@@ -955,6 +964,13 @@ def _wire_relief_composite(
 
     group_input = next(n for n in group_tree.nodes if n.type == "GROUP_INPUT")
     group_output = next(n for n in group_tree.nodes if n.type == "GROUP_OUTPUT")
+
+    if height_image is not None:
+        height_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        height_tex.name = "PSO_Height"
+        height_tex.image = height_image
+        height_tex.location = (0, -1200)
+        _ = group_tree.links.new(group_input.outputs["Vector"], height_tex.inputs["Vector"])
 
     # Alpha always passes straight through from the diffuse node - the relief composite only ever
     # affects color.

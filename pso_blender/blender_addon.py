@@ -35,6 +35,12 @@ from .bake_lighting_menu import (
     register_scene_properties as register_bake_scene_properties,
     unregister_scene_properties as unregister_bake_scene_properties)
 from .decal_prep_menu import BatchPrepareDecalsForScene
+from .relief_displace_menu import (
+    BatchApplyReliefDisplacement,
+    BatchApplyReliefDisplacementForActiveMaterial,
+    PSO_PT_relief_displace,
+    register_scene_properties as register_relief_displace_scene_properties,
+    unregister_scene_properties as unregister_relief_displace_scene_properties)
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -131,6 +137,9 @@ classes = [
     BatchPrepareDecalsForScene,
     BatchBakeDecals,
     PSO_PT_bake_lighting,
+    BatchApplyReliefDisplacement,
+    BatchApplyReliefDisplacementForActiveMaterial,
+    PSO_PT_relief_displace,
     PSO_MT_import,
     PSO_MT_export
 ]
@@ -157,6 +166,7 @@ def register():
     material_as_any.xj_settings = PointerProperty(type=XjMaterialSettings)
     # Add settings to scenes
     register_bake_scene_properties()
+    register_relief_displace_scene_properties()
     # Add hooks
     load_post.append(convert_legacy_properties)
 
@@ -174,4 +184,5 @@ def unregister():
     del cast(Any, bpy.types.Object).njcm_settings
     del cast(Any, bpy.types.Material).xj_settings
     unregister_bake_scene_properties()
+    unregister_relief_displace_scene_properties()
     load_post.remove(convert_legacy_properties)
