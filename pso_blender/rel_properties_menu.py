@@ -22,6 +22,7 @@ class MeshRelSettings(bpy.types.PropertyGroup):
     always_rendered: BoolProperty(name="Always rendered", description="Object will not be affected by view distance and will always be rendered.", default=False)
     is_stencil_viewer: BoolProperty(name="Stencil viewer", description="Stenciled objects will be visible when rendered behind this object.", default=False)
     is_stenciled: BoolProperty(name="Stenciled", description="Object will only be visible when rendered behind a stencil viewer", default=False)
+    exclude_from_relief_displacement: BoolProperty(name="Exclude from relief displacement", description="Skip this object when running Apply Relief Displacement (relief_displace_menu.py)", default=False)
 
 
 class ObjectWithRelSettings(bpy.types.Object):
@@ -87,6 +88,7 @@ class MeshNrelSettingsPanel(Panel):
             col.prop(settings, "is_translucent")
             col.prop(settings, "is_stencil_viewer")
             col.prop(settings, "is_stenciled")
+            col.prop(settings, "exclude_from_relief_displacement")
 
 
 @final

@@ -1,6 +1,6 @@
 from collections.abc import Generator, Sequence
 from functools import cache
-import math
+import math, re
 from typing import Any, ClassVar, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
 import bpy.types
@@ -10,6 +10,24 @@ from .serialization import Serializable
 
 
 T = TypeVar("T", bound=int | float)
+
+
+_VARIANTLESS_MAP_NAME = re.compile("map_[a-z]+[0-9]{2}")
+
+
+def variantless_map_basename(filename_no_ext: str) -> str:
+    """Strips a multi-segment map's "_00"-style segment suffix (and any trailing r/n/c REL
+    variant letter already removed by the caller) down to the base name its .xvm is actually
+    shared under - e.g. "map_acity00_00" -> "map_acity00". Real Ephinea map data names a
+    multi-segment map's .rel/.tam siblings per-segment (map_acity00_00n.rel, map_acity00_00.tam)
+    but shares a single .xvm across every segment, named without the segment suffix
+    (map_acity00.xvm) - so the .xvm sibling path must be derived from this variantless form, not
+    from the same noext used to build the .rel/.tam siblings. A single-segment map (e.g.
+    "map_aforest01") has no segment suffix to strip, so this is a no-op for those and returns the
+    name unchanged.
+    """
+    match = _VARIANTLESS_MAP_NAME.match(filename_no_ext)
+    return match.group() if match else filename_no_ext
 
 
 class ModalStepOperator:
@@ -31,14 +49,28 @@ class ModalStepOperator:
     _modal_timer: bpy.types.Timer | None = None
     _modal_steps: Generator[None, None, None] | None = None
     _modal_done: int = 0
+    _prev_use_global_undo: bool = True
 
     def start_modal_steps(self, context: bpy.types.Context, steps: Generator[None, None, None], total: int):
+        # A real import/export creates or touches hundreds of interdependent datablocks (objects,
+        # materials, shared ImgGroup node groups, images) across many separate modal timer steps
+        # rather than one atomic call. Leaving Blender's global undo system on for the whole
+        # duration has been observed to corrupt shared node group wiring on a later Undo+Redo
+        # (Image Texture nodes losing their .image reference, materials rendering solid black) -
+        # excluding 'UNDO' from the operator's own bl_options was not enough to prevent this by
+        # itself. Disabling global undo for the whole operation (restored once it finishes, in
+        # finish()/_cleanup_modal_steps, including on error) sidesteps this entirely.
+        self._prev_use_global_undo = context.preferences.edit.use_global_undo
+        context.preferences.edit.use_global_undo = False
         if bpy.app.background:
             # No window/event loop to pump TIMER events through in headless (--background) mode -
             # and no UI to show a progress bar in either way - so just run every step
             # synchronously, exactly like a plain blocking loop would. Only interactive sessions
             # actually need (and can show) the modal/timer-driven version below.
-            return self._run_steps_synchronously(context, steps)
+            try:
+                return self._run_steps_synchronously(context, steps)
+            finally:
+                context.preferences.edit.use_global_undo = self._prev_use_global_undo
         wm = context.window_manager
         self._modal_steps = steps
         self._modal_done = 0
@@ -91,12 +123,25 @@ class ModalStepOperator:
             cast(Any, self).report({"ERROR"}, str(e))
             return {"CANCELLED"}
 
+    def cancel(self, context: bpy.types.Context):
+        # Blender calls THIS - not modal() - when a modal operator's handler is torn down by any
+        # means other than modal() itself returning {'CANCELLED'}/{'FINISHED'} (confirmed to
+        # actually happen live: pressing Escape during an import leaves the operator without a
+        # single further TIMER event, so modal()'s own except/StopIteration branches never run).
+        # Without this override, _cleanup_modal_steps() never runs on that path, permanently
+        # leaking use_global_undo=False (and the progress cursor/timer) for the rest of the
+        # Blender session - confirmed live: Escaping an import left Global Undo unchecked in
+        # Preferences, and every later action (including plain object moves) stopped having any
+        # undo history at all, with no error or other symptom to point at the cause.
+        self._cleanup_modal_steps(context)
+
     def _cleanup_modal_steps(self, context: bpy.types.Context):
         wm = context.window_manager
         wm.progress_end()
         if self._modal_timer is not None:
             wm.event_timer_remove(self._modal_timer)
             self._modal_timer = None
+        context.preferences.edit.use_global_undo = self._prev_use_global_undo
 
     def finish(self, context: bpy.types.Context):
         """Called once every step has completed successfully - override for any final assembly
@@ -126,7 +171,18 @@ class Texture:
 
     def __init__(self, *, id: int, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
-        self.name = image.filepath_from_user() or image.name # Path can be empty if texture was created programmatically
+        # bpy.path.abspath(image.filepath), NOT image.filepath_from_user() - the latter resolves
+        # dynamically against the CURRENT scene frame + a generic default ImageUser, and only
+        # starts doing so once the image has actually been evaluated for display (e.g. Material
+        # Preview) - the exact same instability already root-caused and fixed in xvm.py's
+        # get_image_sequence_images (see that function's comment). Here it corrupted something
+        # worse than a wrong read: TextureManager uses this .name as its DEDUPLICATION key, so an
+        # animated (SEQUENCE-source) texture's base image - whose live-resolved path drifts onto
+        # its own frame 1 once Material Preview has run - collides with that frame's own Texture
+        # entry and silently swallows it, permanently dropping one real frame from the export.
+        # image.filepath is the static, load-time path, never re-resolved against any ImageUser or
+        # scene frame - stable regardless of what's been previewed in this Blender session.
+        self.name = bpy.path.abspath(image.filepath) if image.filepath else image.name # Path can be empty if texture was created programmatically
         self.material_name = material_name
         self.image = image
         self.generate_mipmaps = generate_mipmaps
@@ -301,6 +357,34 @@ def find_material_normal_and_metal_images(mat: bpy.types.Material) -> tuple["bpy
             metal_image = cast(bpy.types.ShaderNodeTexImage, tex_node).image
 
     return (normal_image, metal_image)
+
+
+def find_material_displacement_image(mat: bpy.types.Material) -> "bpy.types.Image | None":
+    """The Displacement (true height, not a normal map's derived slope) image of an arbitrary,
+    foreign PBR material, if any - e.g. Poly Haven materials routinely ship a dedicated "disp" map
+    wired into a Displacement node feeding Material Output's Displacement socket, entirely separate
+    from the Normal Map wired into the Principled BSDF (found by find_material_normal_and_metal_
+    images instead). Expects Material Output's Displacement input to be linked to a
+    ShaderNodeDisplacement, whose Height input is in turn linked to an Image Texture - the standard
+    way this is wired regardless of which addon/library built the graph."""
+    if mat.node_tree is None:
+        return None
+    output_node = next((n for n in mat.node_tree.nodes if n.type == "OUTPUT_MATERIAL"), None)
+    if output_node is None:
+        return None
+    displacement_input = cast(bpy.types.ShaderNodeOutputMaterial, output_node).inputs.get("Displacement")
+    if displacement_input is None or not displacement_input.is_linked:
+        return None
+    displacement_node = displacement_input.links[0].from_node
+    if displacement_node.type != "DISPLACEMENT":
+        return None
+    height_input = cast(bpy.types.ShaderNodeDisplacement, displacement_node).inputs.get("Height")
+    if height_input is None or not height_input.is_linked:
+        return None
+    tex_node = height_input.links[0].from_node
+    if tex_node.type == "TEX_IMAGE":
+        return cast(bpy.types.ShaderNodeTexImage, tex_node).image
+    return None
 
 
 def find_material_roughness_image(mat: bpy.types.Material) -> "bpy.types.Image | None":

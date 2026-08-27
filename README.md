@@ -3,7 +3,6 @@ For more information check out (https://github.com/jtuu/pso-blender).*
 
 My work is generaly texture oriented so the modifications i could add here will be focused on texture edition more than map creation. Some functionnalities may change by this way.
 
-
 # pso-blender
 
 A Blender add-on (v4.2+) for importing and exporting Phantasy Star Online Blue Burst's map and
@@ -19,11 +18,32 @@ the original mesh/collision files.
 * **r.rel** - Minimap geometry
 
 > [!NOTE]
-> Exporting a file named `foo.rel` writes three files: `foon.rel`, `fooc.rel`, `foor.rel`.
+> Exporting a file named `foo.rel` writes `foon.rel`/`fooc.rel`/`foor.rel` - but only whichever
+> of the three actually have matching objects (REL Settings: render/collision/minimap) in the
+> current scene. A scene with no collision objects, for example, won't produce a `c.rel` at all.
 
 An `.xvm` is created alongside a `.rel`/`.xj` export whenever the exported objects contain
-materials with image input nodes. Animated textures (`.tam`) can be created using an image
-sequence material node.
+materials with image input nodes.
+
+Object export is resilient to a few real, common map data quirks instead of aborting the whole
+file over them:
+- An object with a texture but no UV layer is skipped (with a warning) instead of failing the
+  entire export - on real map data this can affect a meaningful fraction of a map's objects.
+- Texture order in the exported `.xvm` follows each texture's original position instead of being
+  resorted alphabetically by material name on every export, so a zero-edit re-export doesn't
+  needlessly restructure the file.
+
+### Animated textures (`.tam`)
+Frame-swap texture animations (a fixed set of textures cycled over time - screens, neon signs,
+lava, waterfalls, etc.) are imported as real Blender Image Sequences, reconstructed from the
+map's `.tam` file, and preview correctly in the 3D viewport (Auto Refresh follows the scene's
+current frame). Each animation's playback speed round-trips through export, and can be edited
+per-object via **Animation Frame Delay** in Material Properties.
+
+### GSL archives
+`Data.gsl` and similar flat, uncompressed `.gsl` archives (bundles of `.rel`/`.xj`/`.xvm`/`.bml`
+files) can be read and extracted - see `gsl.py`. Read-only for now; extracted files can be fed
+straight into this add-on's existing import operators.
 
 ### BML/XJ - NPCs, objects, items, etc.
 Textures are imported by selecting both the `.bml`/`.xj` file and its `.xvm` in the file select
@@ -83,6 +103,24 @@ and choose **Send to ImgGroup (PSO)**.
 * **XJ Settings** (context: Material) - blend mode, per-axis texture addressing, Generate
   Mipmaps, the PSO texture ID/source `.xvm` path used by standalone `Export XVM`, and buttons to
   select every object/face using the active material's texture across the whole map.
+
+## Running steps
+
+Topics currently being investigated or intentionally left on hold across the project.
+
+### Open / unresolved
+- UV-scroll texture animation (`HAS_UV_ANIMATION`) is not yet imported or exported.
+- Animated/moving mesh objects such as doors (`Chunk.animated_mesh_trees`) are not yet imported or exported.
+- `Data.gsl` archives can be read, but how a map links to a specific object inside one isn't known yet.
+- A zero-edit REL export is not yet byte-identical to the original file.
+- Real mipmap generation quality/parity with the game's own encoder hasn't been reverified recently.
+- An add-on uninstall cleanup gap hasn't been reverified recently.
+- A 90°-Z axis mapping/UV correction bug hasn't been reverified recently.
+
+### Deferred by choice (not started)
+- Full map import beyond render/collision geometry (skybox, `bm.bin`, `fogentry.dat`).
+- A map-wide "every animation" overview UI, beyond the current per-object field.
+- Timing-accurate Blender preview of frame-swap animation speed (currently uniform in the viewport).
 
 ## Installation
 1. Download or git clone this project.

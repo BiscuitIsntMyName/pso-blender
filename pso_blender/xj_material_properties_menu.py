@@ -2,7 +2,6 @@ from enum import Enum
 from typing import cast, final
 import os
 import bpy
-import bmesh
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context
 from . import util
@@ -118,6 +117,28 @@ def _set_generate_mipmaps(self: bpy.types.PropertyGroup, value: bool):
         group_tree["generate_mipmaps"] = value
 
 
+def _get_animation_frame_delay(self: bpy.types.PropertyGroup) -> int:
+    # Real animated .tam data (map_desert03, map_acity) always uses one uniform delay across
+    # every frame of a given animation - never a different value per frame - so a single shared
+    # value is enough to represent every real case seen so far, rather than a per-frame list.
+    image = util.find_diffuse_image(cast(bpy.types.Material, self.id_data))
+    if image is None or image.source != "SEQUENCE":
+        return 1
+    delays = image.get("pso_tam_frame_delays")
+    return int(delays[0]) if delays else 1
+
+
+def _set_animation_frame_delay(self: bpy.types.PropertyGroup, value: int):
+    # pso_tam_frame_delays (see get_or_build_animated_texture_image in xj.py) is what tam.write()
+    # (tam.py) reads back on export - overwriting it here, uniformly across every existing frame,
+    # is the entire mechanism: no other code needs to change for an edited speed to reach the
+    # exported .tam and, from there, the game.
+    image = util.find_diffuse_image(cast(bpy.types.Material, self.id_data))
+    if image is not None and image.source == "SEQUENCE":
+        frame_count = len(image.get("pso_tam_frame_delays") or [1])
+        image["pso_tam_frame_delays"] = [value] * frame_count
+
+
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class XjMaterialSettings(bpy.types.PropertyGroup):
     # Shared across every material variant of this texture (stored on the texture's ImgGroup node
@@ -138,6 +159,17 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         items=AlphaCompression_items,
         get=_get_alpha_compression,
         set=_set_alpha_compression)
+    # Shared across every material variant of this texture, same reasoning as generate_mipmaps -
+    # only meaningful (and only shown, see XjMaterialSettingsPanel.draw) when the texture is an
+    # imported animated sequence (image.source == "SEQUENCE").
+    animation_frame_delay: IntProperty(
+        name="Animation Frame Delay",
+        description="Game ticks each frame is shown before advancing to the next - higher is slower. "
+                     "Applies uniformly to every frame of this animation.",
+        min=1,
+        default=1,
+        get=_get_animation_frame_delay,
+        set=_set_animation_frame_delay)
     src_blend: EnumProperty(
         name="Source",
         default=str(BlendMode.D3DBLEND_SRCALPHA.name),
@@ -181,89 +213,6 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
 
 class MaterialWithXjSettings(bpy.types.Material):
     xj_settings: XjMaterialSettings
-
-
-def _get_material_image(mat: bpy.types.Material) -> bpy.types.Image | None:
-    """The texture image plugged into a material's image texture node, if any.
-
-    Different material variants of the same texture (different blend mode / addressing) each
-    get their own material datablock, but they all share the same node group wrapping the actual
-    Image Texture node (see get_or_create_texture_node_group in xj.py) - that image is the thing
-    that actually identifies "this texture" for the user.
-    """
-    return util.find_diffuse_image(mat)
-
-
-@final
-class XjSelectMaterialEverywhere(bpy.types.Operator):
-    "Select every object (optionally down to the exact faces) in the view layer that uses this texture (regardless of which material variant - blend mode / addressing - it's assigned through)"
-
-    bl_idname = "material.xj_select_faces_everywhere"
-    bl_label = "Select Objects Using This Texture"
-    bl_options = {"REGISTER", "UNDO"}
-
-    precise_face_selection: BoolProperty(
-        name="Precise Face Selection",
-        description="Enter Edit Mode and select only the exact faces using this texture, instead of stopping at whole-object selection",
-        default=False)
-
-    @classmethod
-    def poll(cls, context: Context):
-        return context.material is not None and context.view_layer is not None
-
-    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
-        target_mat = context.material
-        view_layer = context.view_layer
-        if target_mat is None or view_layer is None:
-            self.report({"ERROR"}, "No active material or view layer")
-            return {"CANCELLED"}
-
-        target_image = _get_material_image(target_mat)
-        if target_image is None:
-            self.report({"ERROR"}, "Active material has no texture to match against")
-            return {"CANCELLED"}
-
-        if context.object is not None and context.object.mode != "OBJECT":
-            bpy.ops.object.mode_set(mode="OBJECT")
-
-        matching_objects: list[bpy.types.Object] = []
-        for obj in view_layer.objects:
-            if obj.type != "MESH":
-                continue
-            mesh = cast(bpy.types.Mesh, obj.data)
-            if any(slot_mat is not None and _get_material_image(slot_mat) is target_image for slot_mat in mesh.materials):
-                matching_objects.append(obj)
-
-        for obj in view_layer.objects:
-            obj.select_set(False)
-
-        if not matching_objects:
-            self.report({"WARNING"}, "No objects in the view layer use this texture")
-            return {"CANCELLED"}
-
-        for obj in matching_objects:
-            obj.select_set(True)
-        view_layer.objects.active = matching_objects[0]
-
-        if not self.precise_face_selection:
-            self.report({"INFO"}, "Selected {} object(s)".format(len(matching_objects)))
-            return {"FINISHED"}
-
-        bpy.ops.object.mode_set(mode="EDIT")
-        for obj in matching_objects:
-            mesh = cast(bpy.types.Mesh, obj.data)
-            matching_slot_indices = {
-                i for i, slot_mat in enumerate(mesh.materials)
-                if slot_mat is not None and _get_material_image(slot_mat) is target_image
-            }
-            bm = bmesh.from_edit_mesh(mesh)
-            for face in bm.faces:
-                face.select_set(face.material_index in matching_slot_indices)
-            bm.select_flush(True)
-            bmesh.update_edit_mesh(mesh)
-
-        self.report({"INFO"}, "Selected faces on {} object(s)".format(len(matching_objects)))
-        return {"FINISHED"}
 
 
 def _resolve_target_imggroup(context: Context) -> tuple[bpy.types.ShaderNodeTree, bpy.types.ShaderNodeTexImage, bpy.types.Material] | str:
@@ -461,6 +410,7 @@ class XjSendAssetPackToImgGroup(bpy.types.Operator):
 
         normal_image, metal_image = util.find_material_normal_and_metal_images(source_mat)
         roughness_image = util.find_material_roughness_image(source_mat)
+        displacement_image = util.find_material_displacement_image(source_mat)
 
         resolved = _resolve_target_imggroup(context)
         if isinstance(resolved, str):
@@ -470,11 +420,14 @@ class XjSendAssetPackToImgGroup(bpy.types.Operator):
 
         tex_image_node.image = diffuse_image
         from . import xj
-        xj._wire_relief_composite(group_tree, tex_image_node, normal_image, metal_image, roughness_image)  # pyright: ignore[reportPrivateUsage]
+        xj._wire_relief_composite(  # pyright: ignore[reportPrivateUsage]
+            group_tree, tex_image_node, normal_image, metal_image, roughness_image, displacement_image)
 
         settings = cast(MaterialWithXjSettings, target_mat).xj_settings
-        if normal_image is None and metal_image is None:
-            self.report({"WARNING"}, "'{}' has no normal or metal map - sent the diffuse image as-is".format(asset.name))
+        if normal_image is None and metal_image is None and displacement_image is None:
+            self.report({"WARNING"}, "'{}' has no normal, metal, or displacement map - sent the diffuse image as-is".format(asset.name))
+        elif displacement_image is not None:
+            self.report({"INFO"}, "Sent '{}' to PSO texture id {} ('{}'), with relief composited live and a real displacement map available".format(asset.name, settings.pso_id, target_mat.name))
         else:
             self.report({"INFO"}, "Sent '{}' to PSO texture id {} ('{}'), with relief composited live".format(asset.name, settings.pso_id, target_mat.name))
         return {"FINISHED"}
@@ -556,15 +509,11 @@ class XjMaterialSettingsPanel(bpy.types.Panel):
             self.layout.use_property_split = True
             self.layout.use_property_decorate = False
             settings = cast(MaterialWithXjSettings, context.material).xj_settings
-            select_col = self.layout.column(align=True)
-            select_objects_op = cast(XjSelectMaterialEverywhere, select_col.operator(
-                XjSelectMaterialEverywhere.bl_idname, text="Select Objects Using This Texture", icon="RESTRICT_SELECT_OFF"))
-            select_objects_op.precise_face_selection = False
-            select_faces_op = cast(XjSelectMaterialEverywhere, select_col.operator(
-                XjSelectMaterialEverywhere.bl_idname, text="Select Faces Using This Texture (Edit Mode)", icon="EDITMODE_HLT"))
-            select_faces_op.precise_face_selection = True
             self.layout.prop(settings, "generate_mipmaps")
             self.layout.prop(settings, "alpha_compression")
+            diffuse_image = util.find_diffuse_image(context.material)
+            if diffuse_image is not None and diffuse_image.source == "SEQUENCE":
+                self.layout.prop(settings, "animation_frame_delay")
             self.layout.prop(settings, "lighting")
             # Alpha blending
             blend_box = self.layout.box()

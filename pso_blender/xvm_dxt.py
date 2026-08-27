@@ -26,32 +26,60 @@ def decompose_rgb565(rgb: int) -> RGB:
     return _DECOMPOSE_RGB565_TABLE[rgb]
 
 
-def dxt_get_block_bounds(
+def _dxt_block_colors(
         pixels: list[float],
         x: int, y: int,
         img_width: int, block_dim: int,
         src_channels: int
-    ) -> tuple[RGB, RGB]:
-    dst_channels = 3
-    min_values = [0xff] * dst_channels
-    max_values = [0] * dst_channels
+    ) -> list[RGB]:
+    colors: list[RGB] = []
     for block_y in range(block_dim):
         for block_x in range(block_dim):
             src_offset = img_width * ((y + block_y) * src_channels) + ((x + block_x) * src_channels)
-            for chan in range(dst_channels):
-                val = int(pixels[src_offset + chan] * 0xff)
-                if max_values[chan] < val:
-                    max_values[chan] = val
-                if min_values[chan] > val:
-                    min_values[chan] = val
-    return (cast(RGB, tuple(min_values)), cast(RGB, tuple(max_values)))
+            colors.append(cast(RGB, tuple(int(pixels[src_offset + chan] * 0xff) for chan in range(3))))
+    return colors
 
 
-def dxt_quantize(min_rgb: RGB, max_rgb: RGB) -> tuple[int, int]:
-    inset = tuple(map(lambda a, b: (a - b) >> 4, max_rgb, min_rgb))
-    max_rgb565 = rgb8_to_rgb565(cast(RGB, tuple(map(lambda a, b: a - b if a >= b else 0, max_rgb, inset))))
-    min_rgb565 = rgb8_to_rgb565(cast(RGB, tuple(map(lambda a, b: a + b if a + b < 0xff else 0xff, min_rgb, inset))))
-    return (min_rgb565, max_rgb565)
+def dxt_get_block_endpoints(block_colors: list[RGB]) -> tuple[RGB, RGB]:
+    """Picks a DXT1 block's two endpoint colors as the two actual pixels furthest apart along the
+    block's own axis of greatest color variance (found via a few power-iteration steps on the
+    color covariance matrix - the standard technique real-time encoders like stb_dxt/squish use,
+    simple enough for pure Python without needing a full eigendecomposition or a numpy dependency).
+
+    Replaces an earlier independent-per-channel min/max ("bounding box corners" + an inset
+    correction to compensate for those corners not being real pixels) - that approach constructs
+    endpoints that don't correspond to any actual pixel in the block, and can visibly shift hue
+    whenever a block's R/G/B channels aren't well correlated with the box's axes (confirmed on
+    real map textures: a saturated, near-flat green background came back visibly more olive/
+    desaturated after compression, even with zero alpha/mip involvement - traced all the way down
+    to this exact function). Endpoints chosen this way are real pixel colors already inside the
+    block's actual color distribution, so no inset/bias correction is needed afterward."""
+    n = len(block_colors)
+    mean = [sum(c[i] for c in block_colors) / n for i in range(3)]
+    # 3x3 symmetric covariance matrix of the block's colors.
+    cov = [[0.0] * 3 for _ in range(3)]
+    for c in block_colors:
+        d = [c[i] - mean[i] for i in range(3)]
+        for i in range(3):
+            for j in range(3):
+                cov[i][j] += d[i] * d[j]
+    # Power iteration converges to the dominant eigenvector (the axis of greatest variance) in a
+    # handful of steps - more than enough given DXT1 only needs a good-enough axis, not an exact
+    # one, to pick better endpoints than a naive per-channel box.
+    axis = [1.0, 1.0, 1.0]
+    for _ in range(4):
+        next_axis = [sum(cov[i][j] * axis[j] for j in range(3)) for i in range(3)]
+        length = sum(v * v for v in next_axis) ** 0.5
+        if length < 1e-6:
+            # Flat/near-uniform block (very common in smaller mip levels) - no dominant axis, any
+            # two identical endpoints are equally correct.
+            flat = cast(RGB, tuple(max(0, min(255, round(v))) for v in mean))
+            return (flat, flat)
+        axis = [v / length for v in next_axis]
+    projections = [sum((c[i] - mean[i]) * axis[i] for i in range(3)) for c in block_colors]
+    min_idx = projections.index(min(projections))
+    max_idx = projections.index(max(projections))
+    return (block_colors[min_idx], block_colors[max_idx])
 
 
 def dxt_make_color_palette(color0: int, color1: int) -> tuple[RGB, RGB, RGB, RGB]:
@@ -163,10 +191,11 @@ def dxt1_compress_block(
         with_alpha: bool,
         coords: tuple[int, int]
     ) -> tuple[int, int, int]:
-    # Find RGB bounds of block
-    color0, color1 = dxt_get_block_bounds(pixels, coords[0], coords[1], img_width, block_dim, src_channels)
-    # Quantize
-    color0_565, color1_565 = dxt_quantize(color0, color1)
+    # Pick the block's two endpoint colors along its own axis of greatest color variance.
+    block_colors = _dxt_block_colors(pixels, coords[0], coords[1], img_width, block_dim, src_channels)
+    color0, color1 = dxt_get_block_endpoints(block_colors)
+    color0_565 = rgb8_to_rgb565(color0)
+    color1_565 = rgb8_to_rgb565(color1)
     # Punch-through mode (color0 <= color1) is a per-block decision, not the whole image's - a
     # block with no meaningfully-transparent texel of its own should stay in normal 4-color opaque
     # mode (one more usable color) even inside an otherwise alpha-enabled image.

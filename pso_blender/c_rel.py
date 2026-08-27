@@ -111,8 +111,13 @@ def write(path: str, objects: list[bpy.types.Object]):
 
     rel = Rel()
     nodes: list[CrelNode] = []
+    # Evaluate through the dependency graph, not obj.to_mesh() directly on the original object,
+    # which silently ignores any live/unapplied modifier (Decimate, Mirror, Subsurf, ...) and
+    # exports the raw base mesh instead - see the same fix in n_rel.py.
+    depsgraph = bpy.context.evaluated_depsgraph_get()
     for obj in objects:
-        blender_mesh = obj.to_mesh()
+        eval_obj = obj.evaluated_get(depsgraph)
+        blender_mesh = eval_obj.to_mesh()
 
         vertex_array = VertexArray()
         geom_center = util.from_blender_axes(util.geometry_world_center(obj) * util.get_pso_world_scale())
@@ -179,7 +184,12 @@ def write(path: str, objects: list[bpy.types.Object]):
             center = util.from_blender_axes(obj.matrix_world @ face.center) * util.get_pso_world_scale()
             radius = math.sqrt(farthest_sq)
             ptr = rel.write(Face(
-                flags=terrain_flags | collision_flags,
+                # Face.flags is 16-bit (terrain type only - Normal/ShallowWater/DeepWater/
+                # Footprints/Grass, all well under 0xff) - the node's own collision_flags (up to
+                # 32 bits, Camera/Wall/Water/Projectiles/...) is already stored once on the
+                # CrelNode itself (below) and must not be duplicated in here too, since doing so
+                # can push the combined value past 0xffff and overflow this 16-bit field.
+                flags=terrain_flags,
                 x=center[0],
                 y=center[1],
                 z=center[2],
@@ -198,7 +208,7 @@ def write(path: str, objects: list[bpy.types.Object]):
         node.mesh = Ptr32(rel.write(mesh))
         nodes.append(node)
 
-        obj.to_mesh_clear() # Delete temporary mesh
+        eval_obj.to_mesh_clear() # Delete temporary mesh
     nodes.append(CrelNode()) # Terminator
     # Write nodes
     first_node_ptr = None
@@ -260,6 +270,7 @@ def to_blender_mesh(rel: Rel, node: CrelNode, node_idx: int) -> bpy.types.Object
 
     obj = bpy.data.objects.new("object_" + str(node_idx), blender_mesh)
     rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+    rel_settings.is_crel = True
     rel_settings.collision_flags_value1 = node.flags & 0xffff
     rel_settings.collision_flags_value2 = (node.flags >> 16) & 0xffff
 

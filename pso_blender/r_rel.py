@@ -57,8 +57,13 @@ def write(path: str, room_objects: list[bpy.types.Object]):
     minimap = Minimap()
     minimap.room_count = len(room_objects)
     rooms: list[Room] = []
+    # Evaluate through the dependency graph, not obj.to_mesh() directly on the original object,
+    # which silently ignores any live/unapplied modifier (Decimate, Mirror, Subsurf, ...) and
+    # exports the raw base mesh instead - see the same fix in n_rel.py.
+    depsgraph = bpy.context.evaluated_depsgraph_get()
     for (i, obj) in enumerate(room_objects):
-        blender_mesh = obj.to_mesh()
+        eval_obj = obj.evaluated_get(depsgraph)
+        blender_mesh = eval_obj.to_mesh()
 
         geom_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
         room = Room(
@@ -129,7 +134,7 @@ def write(path: str, room_objects: list[bpy.types.Object]):
         room.mesh_container = Ptr32(container_ptr)
         rooms.append(room)
 
-        obj.to_mesh_clear() # Delete temporary mesh
+        eval_obj.to_mesh_clear() # Delete temporary mesh
     # Write rooms
     first_room_ptr = None
     for room in rooms:
