@@ -41,6 +41,14 @@ from .relief_displace_menu import (
     PSO_PT_relief_displace,
     register_scene_properties as register_relief_displace_scene_properties,
     unregister_scene_properties as unregister_relief_displace_scene_properties)
+from .gsl_browser_menu import (
+    GslBrowserEntry,
+    PsoLoadGslArchive,
+    PsoExtractGslEntries,
+    PSO_UL_gsl_entries,
+    PSO_PT_gsl_browser,
+    register_scene_properties as register_gsl_browser_scene_properties,
+    unregister_scene_properties as unregister_gsl_browser_scene_properties)
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -140,6 +148,11 @@ classes = [
     BatchApplyReliefDisplacement,
     BatchApplyReliefDisplacementForActiveMaterial,
     PSO_PT_relief_displace,
+    GslBrowserEntry,
+    PsoLoadGslArchive,
+    PsoExtractGslEntries,
+    PSO_UL_gsl_entries,
+    PSO_PT_gsl_browser,
     PSO_MT_import,
     PSO_MT_export
 ]
@@ -167,6 +180,7 @@ def register():
     # Add settings to scenes
     register_bake_scene_properties()
     register_relief_displace_scene_properties()
+    register_gsl_browser_scene_properties()
     # Add hooks
     load_post.append(convert_legacy_properties)
 
@@ -185,4 +199,5 @@ def unregister():
     del cast(Any, bpy.types.Material).xj_settings
     unregister_bake_scene_properties()
     unregister_relief_displace_scene_properties()
+    unregister_gsl_browser_scene_properties()
     load_post.remove(convert_legacy_properties)
