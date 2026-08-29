@@ -445,7 +445,11 @@ def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.
                 y=mesh_world_pos.y - chunk_world_pos.y,
                 z=mesh_world_pos.z - chunk_world_pos.z)
             try:
-                mesh = xj.make_mesh(rel, obj, blender_mesh, texture_man)
+                # bake_object_transform=False - this loop already writes the object's own real
+                # rotation (rot_x/y/z) and scale (scale_x/y/z) into mesh_node above, unlike the
+                # standalone .xj/.bml exporter; baking them into vertex data too would double-apply
+                # both (confirmed live for rotation - see make_mesh's docstring, xj.py).
+                mesh = xj.make_mesh(rel, obj, blender_mesh, texture_man, bake_object_transform=False)
             except Exception as ex:
                 # A single malformed object (e.g. a texture but no UV layer - a real, pre-existing
                 # data quirk confirmed on real map_acity data) previously aborted the ENTIRE export

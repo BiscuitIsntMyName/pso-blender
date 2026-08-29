@@ -3,6 +3,7 @@ from typing import ClassVar, TypeAlias, TypeGuard, cast, final
 from warnings import warn
 import bpy, os, bmesh, math, hashlib
 from dataclasses import dataclass, field
+from mathutils import Matrix
 
 from bpy.types import Collection, FloatColorAttribute, Material
 
@@ -483,7 +484,8 @@ def write_vertex_buffer(
     xj_mesh: XjMesh,
     has_textures: bool,
     vertex_colors: bpy.types.FloatColorAttribute | None,
-    normal_type: int | None) -> list[TempFace]:
+    normal_type: int | None,
+    bake_matrix: Matrix) -> list[TempFace]:
     """Returns triangles matching indices of created vertices"""
 
     use_normals = normal_type is not None
@@ -507,19 +509,21 @@ def write_vertex_buffer(
         for (vert_idx, loop_idx) in zip(face.vertices, face.loops):
             # Gather all required and optional vertex attributes
             vertex_attributes = VertexAttributes(idx=vert_idx)
-            # Exclude translation from transform. Use matrix_local (relative to the object's own
-            # parent, i.e. its chunk_root), not matrix_world - the chunk's own rotation
-            # (chunk_root.rotation_euler, set from the file's chunk.rot_x/y/z) is already applied
-            # separately via the parent/child scene-graph relationship on import and in-game, so
-            # baking it into the vertex data too double-applies it. Invisible for the vast
-            # majority of chunks (which have zero rotation, so matrix_local and matrix_world's
-            # rotation component coincide), but confirmed on real map_acity00_00 data: chunk 30
-            # (the reported "commerce district") has an genuine 180-degree chunk-level rotation,
-            # and every mesh in it was being doubly-rotated on export, corrupting its geometry.
+            # Exclude translation from transform (still true regardless of bake_matrix - see
+            # make_mesh's bake_object_transform docstring for what bake_matrix actually excludes
+            # and why: obj.matrix_local (rotation+scale, no translation) when the caller has no
+            # other way to carry them, or identity when the caller already writes the object's own
+            # rotation/scale into the mesh node's own fields separately - baking them into vertex
+            # data too would double-apply them. The chunk's own rotation is never part of
+            # matrix_local in the first place (it's a separate parent transform, chunk_root) so it
+            # was never at risk here - confirmed on real map_acity00_00 data: chunk 30 (the reported
+            # "commerce district") has a genuine 180-degree chunk-level rotation, and every mesh in
+            # it was being doubly-rotated before this function switched from matrix_world to
+            # matrix_local-derived bake_matrix.
             local_vert = blender_mesh.vertices[vert_idx]
             world_vert = local_vert.co.to_4d()
             world_vert.w = 0
-            world_vert = util.from_blender_axes((obj.matrix_local @ world_vert).to_3d())
+            world_vert = util.from_blender_axes((bake_matrix @ world_vert).to_3d())
             vertex_attributes.x = world_vert[0]
             vertex_attributes.y = world_vert[1]
             vertex_attributes.z = world_vert[2]
@@ -562,9 +566,10 @@ def write_vertex_buffer(
                     normal = local_vert.normal
                 normal = normal.to_4d()
                 normal.w = 0
-                # Same matrix_local reasoning as the position transform above - the chunk's
-                # rotation must not be double-applied to normals either.
-                normal = util.from_blender_axes((obj.matrix_local @ normal).to_3d().normalized())
+                # Same bake_matrix reasoning as the position transform above - whatever rotation is
+                # already captured separately by the caller must not be double-applied to normals
+                # either.
+                normal = util.from_blender_axes((bake_matrix @ normal).to_3d().normalized())
                 vertex_attributes.nx = normal[0]
                 vertex_attributes.ny = normal[1]
                 vertex_attributes.nz = normal[2]
@@ -732,11 +737,37 @@ def write_index_buffers(
     xj_mesh.index_buffers = Ptr32(first_opaque_index_buffer_container_ptr)
 
 
-def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager) -> XjMesh:
+def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blender_mesh: bpy.types.Mesh, texture_man: xvm.TextureManager,
+        bake_object_transform: bool = True) -> XjMesh:
+    """bake_object_transform controls whether obj's own rotation AND scale (not the chunk's - see
+    the matrix_local comment below) get baked into the exported vertex/normal data, same double-
+    application concern as the already-fixed chunk-rotation issue, just one level down:
+
+    - True (default, used by the standalone .xj/.bml exporter via make_mesh_tree): that path always
+      writes a fixed scale_x/y/z=1.0 on XjMeshTreeNode, and never writes rot_x/y/z at all for a node
+      that has a mesh (only for mesh-less "child transform" nodes) - baking is the ONLY way an
+      individual mesh's real rotation and scale are captured there.
+    - False (used by the REL map exporter, n_rel.py): that path separately writes real
+      mesh_node.rot_x/y/z (from obj.rotation_euler) AND real mesh_node.scale_x/y/z (from obj.scale)
+      for every mesh object, always - so baking the object's own rotation/scale into vertices there
+      double-applies both on top of those already-written fields. Rotation confirmed live on real
+      map_acity00_00 data (object 20_44_node_0, a real ~-45 degree individual rotation - most
+      objects have this baked out via the UNIT_ANG eval flag and a resulting rotation_euler of
+      exactly zero, which is why this went unnoticed until now): a round-tripped export's vertex
+      positions matched the original's rotated a SECOND time by the object's own angle - byte-for-
+      byte reproducible by rotating the original local coordinates by obj.rotation_euler a second
+      time. Scale follows the exact same reasoning/code path but hasn't been independently
+      confirmed live yet (no real map object with non-uniform/non-1.0 scale found so far to test
+      against) - fixed proactively rather than left as a known-analogous latent bug.
+    """
     if texture_man.object_has_textures(obj) and len(blender_mesh.uv_layers) < 1:
         raise Exception("XJ error in object '{}': Object has texture but is missing UVs".format(obj.name))
 
     mesh = XjMesh()
+    # Translation is already excluded below via to_4d()/w=0 regardless of this matrix. Rotation and
+    # scale are excluded here (identity) when the caller already writes the object's own rotation
+    # and scale separately - see the bake_object_transform docstring above.
+    bake_matrix = obj.matrix_local if bake_object_transform else Matrix.Identity(4)
 
     normal_type = None
     for mat_slot in obj.material_slots:
@@ -778,7 +809,7 @@ def make_mesh(destination: util.AbstractFileArchive, obj: bpy.types.Object, blen
                 has_vertex_alpha = True
                 break
     # Write various mesh data
-    triangles = write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.object_has_textures(obj), vertex_colors, normal_type)
+    triangles = write_vertex_buffer(destination, obj, blender_mesh, mesh, texture_man.object_has_textures(obj), vertex_colors, normal_type, bake_matrix)
     write_index_buffers(destination, obj, triangles, mesh, texture_man, has_vertex_alpha)
     return mesh
 

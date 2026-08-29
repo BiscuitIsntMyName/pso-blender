@@ -57,6 +57,14 @@ class ImportRecentRel(Operator):  # pyright: ignore[reportIncompatibleMethodOver
     xvm_path: StringProperty(options={"HIDDEN"})
     tam_path: StringProperty(options={"HIDDEN"})
 
+    @classmethod
+    def description(cls, context: Context, properties: "ImportRecentRel") -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
+        # Overrides the tooltip per-button (Blender's documented mechanism for this - each entry
+        # in the recent-imports list/panel calls this same operator with different property
+        # values) to show the actual source path instead of the generic class docstring, which
+        # was identical and unhelpful across every entry.
+        return cast(str, properties.rel_path) or cls.__doc__ or ""
+
     # Deliberately has no invoke() - a UI button always triggers a click via Blender's default
     # invoke flow, and an Operator with no invoke() of its own falls straight through to
     # execute() (Blender's documented default), which is what makes this a true one-click
