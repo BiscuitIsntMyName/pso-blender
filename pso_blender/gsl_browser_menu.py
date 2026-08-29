@@ -278,6 +278,7 @@ class PSO_PT_gsl_browser(Panel):  # pyright: ignore[reportIncompatibleMethodOver
     bl_space_type = "VIEW_3D"
     bl_region_type = "UI"
     bl_category = "pso-blender"
+    bl_options = {"DEFAULT_CLOSED"}
 
     def draw(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         layout = self.layout
