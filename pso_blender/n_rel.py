@@ -270,18 +270,34 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
         chunk.x = chunk_center.x
         chunk.y = chunk_center.y
         chunk.z = chunk_center.z
-        # Calculate chunk radius - horizontal (X/Z) ground-plane distance only, matching how the
-        # marker-based path below already does it (obj_center.xz, not .xy - Y is height, mixing
-        # it in against the chunk's Z position previously produced wildly inflated radii for any
-        # chunk positioned far from the origin along Z, e.g. map_acity's chunk 41 at z=-2000
-        # computed a radius of ~2200 instead of the real file's 374.5).
-        furthest_dist_sq = 0
-        for obj in objs:
-            obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
-            dist_sq = util.distance_squared(obj_center.xz.to_tuple(), Vector((chunk_center.x, 0.0, chunk_center.z)).xz.to_tuple())
-            if dist_sq > furthest_dist_sq:
-                furthest_dist_sq = dist_sq
-        chunk.radius = math.sqrt(furthest_dist_sq)
+        stored_radius = coll.get("chunk_radius") if coll is not None else None
+        if stored_radius is not None:
+            # Re-exporting an already-imported map: trust the file's real radius (stashed on
+            # import onto the collection, see read_steps) instead of recomputing an
+            # approximation from geometry below - confirmed on real map data (aforest01) that the
+            # geometry-based recompute produces a radius less than half the file's real value,
+            # which gets chunks culled by the game while they're still on-screen (the reported
+            # "whole map section blinks in/out while turning the camera" bug).
+            chunk.radius = cast(float, stored_radius)
+        else:
+            # Freshly authored chunk collection with no round-trip data - approximate the radius
+            # from geometry. Horizontal (X/Z) ground-plane distance only, matching how the
+            # marker-based path below already does it (obj_center.xz, not .xy - Y is height,
+            # mixing it in against the chunk's Z position previously produced wildly inflated
+            # radii for any chunk positioned far from the origin along Z, e.g. map_acity's chunk
+            # 41 at z=-2000 computed a radius of ~2200 instead of the real file's 374.5). Also
+            # adds each object's own greatest XZ dimension, same margin the marker-based path
+            # already applies - a chunk radius measured only to each member's center (no margin)
+            # is exactly the bug fixed above for the round-trip case.
+            furthest_dist_sq = 0
+            for obj in objs:
+                obj_center = util.from_blender_axes(util.geometry_world_center(obj)) * util.get_pso_world_scale()
+                dist = util.distance(obj_center.xz.to_tuple(), Vector((chunk_center.x, 0.0, chunk_center.z)).xz.to_tuple())
+                greatest_obj_dim = max((obj.dimensions.xy * util.get_pso_world_scale()).to_tuple())
+                dist += greatest_obj_dim
+                if dist * dist > furthest_dist_sq:
+                    furthest_dist_sq = dist * dist
+            chunk.radius = math.sqrt(furthest_dist_sq)
         if chunk.radius > max_chunk_radius:
             warn("N.REL Warning: Distance between objects in chunk '{}' might be too large (expected maximum distance of {:.1f}, was {:.1f}).".format(
                     coll_name, max_chunk_radius, chunk.radius))
@@ -552,6 +568,14 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
         collection.children.link(chunk_coll)
         chunk_coll["chunk_offset"] = hex(chunk.get_offset())
         chunk_coll["chunk_flags"] = chunk.flags
+        # Round-trip safety net, same reasoning as chunk_root's position/rotation below: the
+        # game's real per-chunk radius isn't just "distance to the furthest member's center" (see
+        # assign_objects_to_chunks - real map data consistently uses a much larger radius than
+        # that recomputation produces, e.g. every chunk in aforest01 is really 452.55 while the
+        # geometry-based recompute produced as little as 184, causing chunks to be culled by the
+        # game while still on-screen). Stash the file's real value here so a re-export can reuse
+        # it exactly instead of recomputing an undersized approximation.
+        chunk_coll["chunk_radius"] = chunk.radius
 
         chunk_root = bpy.data.objects.new("chunk_root_" + str(chunk.id), None)
         chunk_root.empty_display_type = "SPHERE"
