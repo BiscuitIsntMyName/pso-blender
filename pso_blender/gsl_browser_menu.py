@@ -196,10 +196,21 @@ class PsoExtractGslEntries(Operator):  # pyright: ignore[reportIncompatibleMetho
         # Selection is read straight off each entry's own `selected` flag, independent of
         # whatever the type filter/search box currently hides - a checked entry stays checked
         # (and gets extracted) even if a filter change scrolls it out of view first.
-        selected = [cast(GslBrowserEntry, e) for e in cast(Any, scene).pso_gsl_entries if cast(bool, e.selected)]
+        collection = cast(Any, scene).pso_gsl_entries
+        selected = [cast(GslBrowserEntry, e) for e in collection if cast(bool, e.selected)]
         if not selected:
-            self.report({"WARNING"}, "No entries checked - nothing to extract.")
-            return {"CANCELLED"}
+            # Two-stage button instead of a dead end: with nothing checked, the first click just
+            # checks everything (a common "I want it all" case - archives here are a few thousand
+            # entries at most, nothing extreme) and stops there; only a second click, now that
+            # something's actually checked, proceeds to extract - never extracts the whole archive
+            # from a single unintentional click.
+            if len(collection) == 0:
+                self.report({"WARNING"}, "Nothing loaded - load Data.gsl first.")
+                return {"CANCELLED"}
+            for entry in collection:
+                cast(Any, entry).selected = True
+            self.report({"INFO"}, "Selected all {} entries - click Extract Selected again to extract them.".format(len(collection)))
+            return {"FINISHED"}
 
         os.makedirs(out_dir, exist_ok=True)
         written = 0

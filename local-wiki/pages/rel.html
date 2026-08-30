@@ -61,54 +61,221 @@
       a render <code>MeshTreeNode</code> points at.</li>
   </ul>
 
+  <h3 class="confirmed">Confirmed - <code>Chunk.animated_mesh_trees</code>' real byte layout, cracked
+    (2026-08-30)</h3>
+  <p style="font-size:14px; color:#6a675e;">Background: a second, separate <code>MeshTree</code>
+    pointer per chunk, presumed to be for animated/moving mesh objects (doors, etc. -
+    <code>MeshTreeFlag</code> has <code>HAS_UV_ANIMATION</code>/<code>HAS_TEXTURE_ANIMATION</code>
+    bits). Long-standing gap: not imported or exported by this addon.</p>
+  <ul>
+    <li><strong>Quantified on real data first (acity)</strong>: <code>map_acity00_00n.rel</code> has 33
+      animated mesh trees across 5 of its 6 chunks (154 static ones total - animated content is 17.6% of
+      all trees by count: chunk 10: 5, chunk 20: 9, chunk 30: 4, chunk 40: 4, chunk 41: 11). A full
+      import-then-export round trip through this addon (no edits) shrinks the file from 607136 to
+      545958 bytes - <strong>61178 bytes (10.1%) silently dropped</strong> - the concrete, measured
+      cause behind "zero-edit REL export isn't byte-identical" (see below) for at least this map.</li>
+    <li><strong>Two community leads pointed the same direction but stalled on the same detail</strong>:
+      pso_ultimate_importer's GameCube parser reads a parallel "animated" list per section with one
+      extra field vs. the static one; the psodevwiki mirror's Schthack notes independently describe the
+      same "Format A / Format B" split and guess the extra field is "<em>probly pointer to the movement
+      data</em>" - neither source decoded it further, both marked it FIXME.</li>
+    <li><strong>Solved directly, empirically, without needing either source to finish the job</strong>:
+      since this addon's own <code>Chunk</code> dataclass already declares
+      <code>animated_mesh_trees</code> as the exact same type as <code>static_mesh_trees</code>
+      (<code>Ptr32[MeshTree]</code>), the obvious first experiment was just running the existing static-
+      tree parser (<code>xj.xj_to_blender_mesh</code>) against it unchanged. Result: exactly every other
+      entry parsed into real, plausible mesh geometry (4-288 vertices) and every other one crashed with
+      a garbage offset - a very characteristic "wrong stride" signature, not random corruption.</li>
+    <li><strong>The real stride is 32 bytes, not 16</strong> - a real <code>MeshTree</code> (16 bytes:
+      <code>root_node</code>/<code>unk1</code>/<code>texture_animation_info</code>/<code>tree_flags</code>,
+      unchanged) sits in the <em>first half</em> of each 32-byte animated entry, followed by 16 bytes of
+      extra per-entry data no other format has documented anywhere. Verified by literally re-running the
+      static mesh importer against every animated tree in acity with this layout:
+      <strong>33 of 33 parsed successfully</strong>, 0 failures - real doors/mechanism geometry loads
+      today, this is no longer theoretical.</li>
+    <li><strong>The extra 16 bytes, first look</strong> (acity's 33 entries only, so treat as a single
+      data point, not a general rule yet): byte-identical across every entry except one bit - a leading
+      <code>float32</code> that's <code>0.2</code> every single time (plausibly a shared animation
+      speed/duration), 8 zero bytes, then a trailing <code>u32</code> that's either <code>0x200000</code>
+      or <code>0x200001</code> (a single low bit differs, meaning not yet known). Whether <code>0.2</code>
+      is truly universal or just constant within this one file needs checking against other maps before
+      reading anything more into it.</li>
+    <li><strong>Doors are NOT part of this animated-mesh list conceptually, but their geometry now looks
+      like it is</strong> - from <code>newserv</code>: doors are ordinary <code>ObjectSetEntry</code>
+      records in <a href="dat.html">.dat</a> (full field layout and door-type-ID table written up
+      there), with open/close driven by quest switch-flag state via <a href="evt.html">.evt</a>'s
+      <code>set_switch_flag</code>/<code>clear_switch_flag</code> opcodes - not a toggle inside
+      <code>n.rel</code>. Best current synthesis, now on firmer ground: <code>animated_mesh_trees</code>
+      is the moving prop's actual <em>geometry</em> (now readable), <code>.dat</code>/<code>.evt</code>
+      is the <em>gameplay logic</em> deciding when to play it (already solved) - <a href="dat.html">the
+      .bml model-lookup problem</a> is the one piece still missing to connect a specific door instance
+      to which of these animated trees (if any) is actually its moving mesh.</li>
+  </ul>
+
+  <h3 class="confirmed">Confirmed - <code>MeshTree.unk1</code> is a real pointer, not a scalar
+    (2026-08-30)</h3>
+  <p style="font-size:14px; color:#6a675e;">Background: <code>unk1</code> ("has something to do with
+    UV animations") sits on the ordinary static <code>MeshTree</code> struct, always 0 except on trees
+    with <code>MeshTreeFlag.HAS_UV_ANIMATION</code> set, where it's consistently a small multiple of 24
+    (0, 24, 48, 240, 264, 288, 360, 384, 408 seen on real acity chunk 20 data) - the working theory
+    going in was "index into a local table," but an extensive brute-force search (150,000+ candidate
+    base offsets across the whole file, two plausibility filters) found zero matches for that shape.</p>
+  <ul>
+    <li><strong>Cross-checked against the file's own pointer relocation table instead of guessing
+      further</strong> - decoded `.rel`'s footer-based reloc table directly (<code>Rel.
+      POINTER_TABLE_POINTER_OFFSET</code>/<code>POINTER_COUNT_OFFSET</code> at <code>-0x20</code>/
+      <code>-0x1C</code> from file end; the table itself turned out to be a flat array of
+      <code>u16</code> dword-deltas - each entry × 4, summed cumulatively from 0 - not the POF0-style
+      variable-length delta scheme <a href="iff.html">IFF/POF0</a> uses, a different in-house scheme
+      for this container format). Checked whether <code>unk1</code>'s own file position appears in that
+      table the same way <code>root_node</code>'s does: <strong>it does</strong>, on every UV-animated
+      tree checked - and <code>texture_animation_info</code>'s position (NULL on these same trees)
+      does <em>not</em> appear, consistent with "null pointers are omitted from the relocation table."
+      Confirms <code>unk1</code> is genuinely <code>Ptr32</code>-typed in the real format, just declared
+      as a plain <code>U32</code> in this addon's dataclass so far.</li>
+    <li><strong>Dereferencing it two levels deep leads to a PAIR of named strings, not a numeric
+      speed/direction</strong>: <code>payload_offset + unk1</code> lands on a small intermediate
+      record shaped <code>(0, name_ptr_A, 0, 0, name_ptr_B, 0)</code> - both non-null pointer slots
+      lead to null-terminated ASCII names, not a single lone reference as first thought. Real pairs
+      pulled from acity: <code>g032_Box03a</code> &harr; <code>g032_hand</code>,
+      <code>g032_machine</code> &harr; <code>g032_rifle</code>, <code>g064_uv_p0</code> &harr;
+      <code>g064_uv_p1</code>, <code>g128_kabe02</code> &harr; <code>g128_kabe02_2</code>. No numeric
+      field anywhere in this 24-byte record - it's purely two name references.</li>
+    <li><strong>User's hypothesis (2026-08-30), fits the evidence well</strong>: maybe there's no
+      stored speed/direction value at all because none is needed - the pair names two related nodes
+      (start/end, fixed/moving, or similar) and the game derives the UV scroll's direction (and
+      possibly rate) directly from those two named nodes' own positions/orientations in the model
+      hierarchy, the same way the mesh geometry itself already defines everything else. Consistent with
+      what's actually in the file: a <code>(name, name)</code> pair, not a `(name, vector)` or
+      `(name, float)` one. Not proven outright, but a real numeric parameter was searched for
+      (brute-force, see above) and never found anywhere nearby - this reframes that as expected rather
+      than still-missing.</li>
+    <li><strong>Directly connects to an older, previously unconnected mystery</strong>: the very first
+      pass at <code>animated_mesh_trees</code> (before this session's 32-byte-stride breakthrough)
+      found its own <code>a_ofs</code> field pointing at "mixed content - name strings like
+      'g032_hand'/'g032_Box03a', and separately real 3D coordinates" - same naming convention
+      (<code>g0XX_...</code>), never explained at the time, and even the exact same name
+      (<code>g032_hand</code>) turning up again here. Strong hint the game engine has one shared
+      named-node-pairing mechanism reused by both the UV-scroll system (static trees) and the
+      moving-mesh system (animated trees) - not two unrelated features. The "separately real 3D
+      coordinates" half of that old finding isn't explained by this pass - still open, and now the
+      natural next thing to check (do those coordinates belong to one of these same named nodes?).</li>
+    <li><strong>Still not fully closed</strong>: whether the pairing genuinely IS the whole mechanism
+      (no numeric parameter anywhere) versus a numeric value still hiding somewhere this pass didn't
+      look isn't proven either way - e.g. the game could still look up a per-name-pair speed from a
+      separate, not-yet-found table at runtime rather than deriving it purely from geometry. Enough
+      real evidence now (two solid names, zero numeric fields, on 18/18 real samples) to treat "no
+      stored speed" as the leading theory rather than an open guess, though.</li>
+    <li><strong>Bigger discovery, following the same lead further</strong>: those name pairs aren't a
+      dedicated UV-animation structure at all - they're just two entries drawn from one big, shared
+      <strong>name table for the whole map</strong>. A plain byte-level scan for null-terminated
+      identifier-shaped strings (<code>[a-z][a-z0-9_]{4,}</code>, immediately followed by
+      <code>0x00</code> - the same "classic <code>strings</code> utility" technique, just restricted to
+      this format's actual naming convention instead of any printable ASCII, which was mostly false
+      positives from ordinary mesh/vertex binary data) found <strong>245 such names on real acity data</strong>,
+      every one of them sitting in a single contiguous ~4KB region (<code>0x91dbe</code>-<code>0x92dac</code>)
+      - clearly one deliberate table, not scattered incidental strings. Covers essentially every named
+      prop/wall/floor/sign/monitor piece used anywhere in the map (<code>n128_buildwall01</code>,
+      <code>o128_s_monitor01</code>, <code>n128_warpwall01</code>, ...) - and includes at least one
+      unambiguous door reference, <code>h32_hnt_door04</code>. Full list saved outside this repo at
+      <code>pso-blender-external-notes/acity_rel_name_table.json</code> (245 names + region bounds) for
+      future keyword searches without re-running the scan.</li>
+    <li><strong>Translating the recurring Japanese roots in that name table is genuinely useful</strong> -
+      these are Sega Japan's own internal dev names, romanized. Worth keeping as a reference glossary
+      for reading any future name table like this one:
+      <table style="font-size:13px;">
+        <tr><th>Root</th><th>Japanese</th><th>Meaning</th></tr>
+        <tr><td><code>kabe</code></td><td>壁</td><td>wall</td></tr>
+        <tr><td><code>yuka</code></td><td>床</td><td>floor</td></tr>
+        <tr><td><code>ten</code></td><td>店</td><td>shop</td></tr>
+        <tr><td><code>kanban</code></td><td>看板</td><td>signboard/sign</td></tr>
+        <tr><td><code>iriguti</code></td><td>入口</td><td>entrance</td></tr>
+        <tr><td><code>hasira</code></td><td>柱</td><td>pillar</td></tr>
+        <tr><td><code>tunagi</code>/<code>tutu</code></td><td>繋ぎ/筒</td><td>connector / tube</td></tr>
+        <tr><td><code>sukima</code></td><td>隙間</td><td>gap/crack</td></tr>
+        <tr><td><code>garasu</code></td><td>ガラス</td><td>glass</td></tr>
+        <tr><td><code>yajirusi</code></td><td>矢印</td><td>arrow (sign)</td></tr>
+        <tr><td><code>jimenn</code></td><td>地面</td><td>ground/terrain</td></tr>
+        <tr><td><code>mizo</code></td><td>溝</td><td>groove/gutter</td></tr>
+        <tr><td><code>tekkotu</code></td><td>鉄骨</td><td>steel frame/girder</td></tr>
+        <tr><td><code>shikiri</code></td><td>仕切り</td><td>partition/divider</td></tr>
+        <tr><td><code>waku</code></td><td>枠</td><td>frame</td></tr>
+        <tr><td><code>hikari</code> / <code>ao</code></td><td>光 / 青</td><td>light / blue (<code>hikari_ao</code> = "light blue")</td></tr>
+        <tr><td><code>gaiheki</code></td><td>外壁</td><td>exterior wall</td></tr>
+        <tr><td><code>yane</code></td><td>屋根</td><td>roof</td></tr>
+        <tr><td><code>tenjo</code></td><td>天井</td><td>ceiling</td></tr>
+        <tr><td><code>jutan</code></td><td>絨毯</td><td>carpet/rug</td></tr>
+        <tr><td><code>drmcan</code></td><td>ドラム缶</td><td>drum/barrel</td></tr>
+      </table>
+      <strong><code>hnt</code></strong> (prefixing <code>counter</code>, <code>door</code>,
+      <code>monitor</code>, <code>kanban</code>, <code>ten</code>, <code>yuka</code>) is most plausibly
+      short for <strong>"Hunter"</strong> - as in Hunter's Guild - given every one of those is exactly
+      the kind of furniture/fixture a shop interior would have. Under that reading,
+      <code>h32_hnt_door04</code> is very likely <strong>the Hunter's Guild door specifically</strong> -
+      matching <a href="dat.html"><code>0x0047 TObjCityDoor_Guild</code></a> ("Door to Hunter's Guild")
+      from the door-type table - not proven by a verified link yet, but a strong naming-convention
+      match. Also visible: a lot of auction-house vocabulary (<code>auct</code>/<code>auctable</code>
+      "auction table"/<code>auctjutan</code> "auction carpet"), consistent with acity's real content.</li>
+    <li><strong>Yes, these names are tied to real positions</strong> - not through a separate lookup
+      array (checked: the file bytes immediately around the name table are the pointer relocation table
+      itself, no room for a parallel position array there), but through the ordinary mechanism this
+      addon already uses for everything else: the position of the <em>tree that references the name
+      pair</em> (root_node's local x/y/z, combined with its chunk's own world position). Confirmed on
+      real data - three UV-animated trees in acity chunk 20 (<code>tutu_g</code>/<code>tutu_o</code>,
+      <code>uv_b0</code>, <code>uv_p0</code>) sit at local positions (332, 38, 108.5), (294, 28.5,
+      108.5), (294, 47.5, 108.5) - visibly close together (same X/Z, small Y offsets), consistent with
+      several small UV-animated sub-parts of one physical assembly placed right next to each other.</li>
+    <li><strong>Tried the same scan against a real <a href="bml.html">.bml</a> - clean negative
+      result</strong>: ran the identical identifier-shaped-string technique against every item in
+      <code>bm_obj_city_common.bml</code> (model bytes, texture list, texture archive, and
+      <code>.njm</code> animation data - all 35 entries, including door-named ones like
+      <code>fd_obj_shopdoor_01</code>, <code>hunter_door</code>, <code>fe_hntdoor_fusagi</code>) - zero
+      real matches anywhere, only float-byte coincidences. Makes sense: <code>.bml</code> already names
+      each model at the archive/filename level, so it never needed an internal string table the way one
+      map-spanning <code>.rel</code> does to cross-reference many named sub-parts within itself. This
+      name table and <code>.bml</code> filenames don't share a direct textual link - the
+      <a href="dat.html">.dat</a>-type-ID-to-<code>.bml</code>-model connection, if it exists beyond a
+      hardcoded client table, isn't this.</li>
+    <li><strong>Now wired into real import, not just a scratch script</strong> (2026-08-30) -
+      <code>n_rel.py</code>'s static-tree loop resolves <code>MeshTree.unk1</code>'s name pair whenever
+      <code>HAS_UV_ANIMATION</code> is set and embeds the first available name into the Blender object's
+      own name (e.g. <code>20_1_g032_Box03a_node_0</code> instead of a bare <code>20_1_node_0</code>),
+      plus both names stashed as <code>obj["pso_uv_part_name_a"/"_b"]</code>. Verified on three real
+      maps: acity (18 objects renamed), aforest01 (0 - correctly finds none, that map has no
+      UV-animated content at all, consistent with the theme), acave01 (37 - thematically coherent names
+      like <code>domagma_taki</code> "lava waterfall" and <code>bridge01</code>/<code>bridge02</code>,
+      confirming the mechanism generalizes past acity's city-specific content).</li>
+    <li><strong>Checked whether the same rename could apply to animated trees - not yet, different
+      structure</strong>: <code>AnimatedMeshTree.unk1</code> is confirmed to be a real pointer too (same
+      relocation-table check as the static case), and is very likely the GameCube-derived <code>a_ofs</code>
+      field from the original animated_mesh_trees investigation (same struct position, right after the
+      mesh pointer) - but it does <strong>not</strong> lead to a name pair. Dereferenced directly (as an
+      absolute offset, not payload-relative like the static case), it lands on a differently-shaped
+      record: <code>(nearby_ptr, small_count, type_flag=0x2000B or 0x30007, ...)</code> - e.g. counts
+      like 120, 300, 1000, 2400 seen on real acity data. Plausibly the "separately real 3D coordinates"
+      half of the old mixed-content finding (movement/keyframe data?) rather than another name table -
+      not decoded yet, a distinct open thread from the static-tree naming work above.
+      Dereferenced <code>nearby_ptr</code> one level further: not a flat float array (checked directly,
+      first 64 bytes are all zero/NaN when read as floats) - it contains yet more embedded pointers,
+      including one pointing back at <code>nearby_ptr</code>'s own address. `type_flag` seen so far:
+      <code>0x20003</code> (acity chunk 20's trees) and <code>0x30007</code> (chunk 40/41's) - two
+      distinct values, plausibly two different sub-kinds of this record. Genuinely deeper/different
+      structure than the static-tree case - paused here rather than continuing to guess blind; a fresh
+      dedicated pass (probably starting from the GC `a_ofs` cross-reference again, now with a concrete
+      "nested pointers, not flat data" shape to test against) is the natural way back in.</li>
+  </ul>
+
   <h3 class="hypothesis">Open / hypothesis</h3>
   <ul>
-    <li><code>Chunk.animated_mesh_trees</code> - a second, separate <code>MeshTree</code> pointer per
-      chunk, presumed to be for animated/moving mesh objects (doors, etc. - <code>MeshTreeFlag</code>
-      even has <code>HAS_UV_ANIMATION</code>/<code>HAS_TEXTURE_ANIMATION</code> bits). Not imported or
-      exported yet. See also the <a href="dat.html">.dat</a>/<a href="evt.html">.evt</a> investigation -
-      originally suspected to be door-related, turned out to be a separate mechanism (enemy
-      spawn/event-script variants), so the door-animation lead is still open and unconnected to that
-      finding.
-      <br><strong>Useful cross-reference found in <code>pso_ultimate_importer</code></strong>
-      (<code>_archives/pso_ultimate_importer-main/__init__.py</code>, <code>parse_stage</code>,
-      ~line 2865): it parses a GameCube-version <code>n.rel</code> ("Flipper" format, big-endian - a
-      related but not identical platform variant from Blue Burst's) and explicitly reads two lists per
-      section/chunk: <code>list_a</code> (static meshes) and <code>list_b</code>
-      (<strong>animated meshes</strong>) - a strong hint <code>list_b</code> is the GameCube analog of
-      our own <code>animated_mesh_trees</code>. Its per-entry layout, 32 bytes: <code>mesh_ofs (U32),
-      a_ofs (U32), 8 bytes, speed (F32), 8 bytes, flags (U32)</code> - matches this addon's own earlier
-      finding on real acity data (see the backlog). Entries whose flags match a small skip-set
-      (<code>0x010244</code>, <code>0x010204</code> for the animated list) are deliberately not read by
-      that importer - presumably non-renderable or special-cased mesh types. Treat as a strong lead, not
-      gospel - GC and BB are related but distinct formats, not verified identical.
-      <br><strong>Second, independent confirmation - psodevwiki mirror</strong>
-      (<a href="https://github.com/jakeprobst/psodevwikibackup">github.com/jakeprobst/psodevwikibackup</a>,
-      a live git mirror of the now-dead sharnoth.com/psodevwiki - <code>pages/format/n_rel.txt</code>
-      and <code>pages/format/n_rel/schthack_notes.txt</code>): the 52-byte Section Table Entry really
-      does carry two parallel offset/count lists - "Format A" (static) and "Format B" (animated) -
-      right next to each other, matching this addon's own <code>Chunk.animated_mesh_trees</code>
-      theory. Schthack's own original mapviewer notes (reproduced verbatim in that mirror) label the
-      animated one's fields <code>VertexB_Off</code>/<code>VertexB_Count</code> and say outright
-      "<em>this one is the animated one</em>," and note Format B's entry has one extra dword vs. Format
-      A that Schthack guesses is "<em>probly pointer to the movement data</em>." Neither source decodes
-      that extra dword further - both mark it FIXME, same place this addon's own investigation stalled.</li>
-      <li><strong>Doors are NOT part of this animated-mesh list</strong> - a real correction to the
-      original theory, from <code>newserv</code>: doors are ordinary <code>ObjectSetEntry</code> records
-      in <a href="dat.html">.dat</a> (full field layout and door-type-ID table now written up there),
-      with open/close driven by quest switch-flag state via <a href="evt.html">.evt</a>'s
-      <code>set_switch_flag</code>/<code>clear_switch_flag</code> opcodes - not a toggle inside
-      <code>n.rel</code> at all. <strong>Best current synthesis</strong>: the <code>n.rel</code>
-      animated-mesh list is likely the door's (or other moving prop's) actual moving <em>geometry</em> -
-      what to render while it's opening - while the separate <code>.dat</code>/<code>.evt</code> system
-      (documented, working) is the <em>gameplay logic</em> deciding when that animation should play.
-      Both pieces are probably needed for a complete picture; only the gameplay-logic half is solved so
-      far.</li>
-    <li>A zero-edit REL export is not yet byte-identical to the original file (tracked separately, see
-      <code>rel_export_branch.md</code> for the detailed coverage/diff tooling).</li>
+    <li>A zero-edit REL export is not yet byte-identical to the original file - now mostly explained by
+      the above for at least acity (tracked separately, see <code>rel_export_branch.md</code> for the
+      detailed coverage/diff tooling).</li>
     <li><code>c.rel</code>/<code>r.rel</code> field-level layout isn't written up here yet - see
       <code>c_rel.py</code>/<code>r_rel.py</code> directly for now (they're reasonably self-documenting
       dataclasses).</li>
+    <li>Not yet implemented in the addon itself: this section documents a successful throwaway-script
+      experiment, not a merged code change - <code>n_rel.py</code>'s real import/export still only knows
+      about <code>static_mesh_trees</code>.</li>
   </ul>
 
   <div class="source-note">Code: <code>pso_blender/rel.py</code> (shared container),

@@ -1,4 +1,4 @@
-import math, os, re, shutil
+import math, os, re, shutil, struct
 from collections.abc import Generator
 from typing import Any, Literal, cast, final
 from mathutils import Vector
@@ -88,6 +88,70 @@ class MeshTree(Serializable):
 
 
 @dataclass
+class AnimatedMeshTree(Serializable):
+    """Chunk.animated_mesh_trees' real per-entry format - a second, separate mesh-tree list per
+    chunk (doors, other moving props), never read by this addon before 2026-08-30. Confirmed
+    empirically (not from any external doc) by re-running the static-tree importer against it with a
+    widened stride: the first 16 bytes are byte-for-byte a normal MeshTree (same 4 fields, same
+    meaning), 100% success (0 failures) across every animated tree on 3 real maps (acity: 33/33,
+    aforest01: 36/36, acave01: 35/35) once the extra 16 bytes below are skipped correctly instead of
+    misinterpreting them as the start of the next entry. See local-wiki/pages/rel.html for the full
+    writeup. The fields below are genuinely unconfirmed - named for round-trip readability, not
+    because their meaning is settled:
+      - anim_speed: always 0.2 on every real sample checked so far, all 3 maps - plausibly a shared
+        animation speed/duration, but that's a guess.
+      - unk_a/unk_b: always 0 on every real sample checked so far.
+      - anim_flags: only bit 0 seen to vary (0x200000 vs 0x200001, acity only - aforest01/acave01
+        were always 0x200000). Possibly connected to the *separate*, already-noted mystery bit
+        0x200000 on ordinary MeshTree.tree_flags (see KNOWN_TREE_FLAGS_MASK's comment above - found
+        on the very same acity chunks, 10 and 20, that also carry animated trees) - not confirmed,
+        just an observation worth keeping in mind for whoever digs into this next.
+    """
+    root_node: Ptr32[xj.XjMeshTreeNode] = Ptr32(NULLPTR)
+    unk1: U32 = 0
+    texture_animation_info: Ptr32[TextureAnimationInfo] = Ptr32(NULLPTR)
+    tree_flags: U32 = 0
+    anim_speed: F32 = 0.0
+    unk_a: U32 = 0
+    unk_b: U32 = 0
+    anim_flags: U32 = 0
+
+
+def _read_cstr(buf: bytes, offset: int) -> str | None:
+    if not (0 < offset < len(buf)):
+        return None
+    end = buf.find(b"\0", offset)
+    if end < 0:
+        return None
+    try:
+        return buf[offset:end].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+
+def _uv_animation_part_names(buf: bytes, payload_offset: int, unk1: int) -> "tuple[str, str] | None":
+    """Confirmed 2026-08-30 (see local-wiki/pages/rel.html) - MeshTree.unk1, when HAS_UV_ANIMATION is
+    set, is a real pointer (payload-relative) to a tiny record holding a pair of names drawn from the
+    file's shared name table - which two named sub-parts the UV scroll relates (e.g. "g032_Box03a" +
+    "g032_hand"). No numeric speed/direction field has ever been found anywhere in this chain (checked
+    thoroughly - see the wiki) - purely informational/for readability, not a settled round-trip field.
+    Only decoded for static MeshTree so far: AnimatedMeshTree's own unk1 is confirmed to be a real
+    pointer too, but leads to a differently-shaped, not-yet-decoded record (looks like a
+    pointer+count+flags triplet, not a name pair) - do not call this for animated trees."""
+    if unk1 <= 0:
+        return None
+    off = payload_offset + unk1
+    if off + 24 > len(buf):
+        return None
+    fields = struct.unpack_from("<6I", buf, off)
+    name_a = _read_cstr(buf, fields[1])
+    name_b = _read_cstr(buf, fields[4])
+    if not name_a and not name_b:
+        return None
+    return (name_a or "", name_b or "")
+
+
+@dataclass
 class Chunk(Serializable):
     """Chunks are used for view distance"""
     id: I32 = 0
@@ -99,7 +163,7 @@ class Chunk(Serializable):
     rot_z: I32 = 0
     radius: F32 = 0.0
     static_mesh_trees: Ptr32[MeshTree] = Ptr32(NULLPTR)
-    animated_mesh_trees: Ptr32[MeshTree] = Ptr32(NULLPTR)
+    animated_mesh_trees: Ptr32[AnimatedMeshTree] = Ptr32(NULLPTR)
     static_mesh_tree_count: U32 = 0
     animated_mesh_tree_count: U32 = 0
     flags: U32 = 0
@@ -550,7 +614,7 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
         raise Exception("Unknown n.rel format '{}'".format(fmt_magic))
 
     chunks = nrel.chunks.deref_array(nrel.chunk_count)
-    result["total"] = sum(chunk.static_mesh_tree_count for chunk in chunks)
+    result["total"] = sum(chunk.static_mesh_tree_count + chunk.animated_mesh_tree_count for chunk in chunks)
 
     collection = bpy.data.collections.new(path)
     result["collection"] = collection
@@ -602,7 +666,16 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
                     warn("N.REL Warning: tree at {} has HAS_TEXTURE_ANIMATION set (animation_id={}) "
                          "but no matching entry was found in the .tam file - importing its texture "
                          "as static.".format(hex(tree.get_offset()), anim_info.animation_id))
-            models = xj.xj_to_blender_mesh("{}_{}".format(chunk.id, tree_counter), root_node, nrel_xvm, tam_entry)
+            uv_names: "tuple[str, str] | None" = None
+            if tree.tree_flags & MeshTreeFlag.HAS_UV_ANIMATION:
+                uv_names = _uv_animation_part_names(rel.buf.buffer, rel.payload_offset, tree.unk1)
+            tree_name = "{}_{}".format(chunk.id, tree_counter)
+            if uv_names:
+                # Not a settled naming convention - just makes these objects recognizable in the
+                # Outliner instead of a bare number, now that we can read what they're actually
+                # called. Only one of the pair (whichever is truthy) is used if the other is empty.
+                tree_name += "_" + (uv_names[0] or uv_names[1])
+            models = xj.xj_to_blender_mesh(tree_name, root_node, nrel_xvm, tam_entry)
             for obj in models.objects:
                 if not obj.parent:
                     # Make top-level objects children of chunk root object
@@ -621,11 +694,69 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
                 # carry through everything else (HAS_UV_ANIMATION, and any undocumented bit real
                 # map data uses) unchanged instead of silently dropping it on export.
                 obj["orig_tree_flags"] = tree.tree_flags
+                if uv_names:
+                    obj["pso_uv_part_name_a"], obj["pso_uv_part_name_b"] = uv_names
                 # Make objects direct children of chunk collection instead
                 chunk_coll.objects.link(obj)
             # Remove now empty collection
             bpy.data.collections.remove(models)
             tree_counter += 1
+            yield
+
+        # Animated mesh trees - doors/moving props. Confirmed-working geometry parse (2026-08-30, see
+        # AnimatedMeshTree above and local-wiki/pages/rel.html) but import-only for now: write() does
+        # not yet serialize this list back out, so round-tripping one of these maps still silently
+        # drops this content on export (tracked in the backlog). Kept in a separate sibling collection
+        # rather than mixed into chunk_coll, so this newly-readable-but-still-experimental content
+        # stays independently toggleable from the confirmed static architecture.
+        anim_coll: bpy.types.Collection | None = None
+        anim_counter = 0
+        for tree in chunk.animated_mesh_trees.deref_array(chunk.animated_mesh_tree_count):
+            if tree.tree_flags & MeshTreeFlag.HAS_DOUBLE_POINTER_ROOT_NODE:
+                dbl_ptr = tree.root_node.retype(cast(type[int], U32))
+                tree.root_node = tree.root_node.clone(dbl_ptr.deref())
+            root_node = tree.root_node.deref()
+            tam_entry: tam.TamEntry | None = None
+            if tree.tree_flags & MeshTreeFlag.HAS_TEXTURE_ANIMATION and tree.texture_animation_info != NULLPTR:
+                anim_info = tree.texture_animation_info.deref()
+                tam_entry = tam_entries.get(anim_info.animation_id)
+                if tam_entry is None:
+                    warn("N.REL Warning: animated tree at {} has HAS_TEXTURE_ANIMATION set (animation_id={}) "
+                         "but no matching entry was found in the .tam file - importing its texture "
+                         "as static.".format(hex(tree.get_offset()), anim_info.animation_id))
+            if anim_coll is None:
+                anim_coll = bpy.data.collections.new("chunk_" + str(chunk.id) + "_animated")
+                collection.children.link(anim_coll)
+            models = xj.xj_to_blender_mesh("{}_anim_{}".format(chunk.id, anim_counter), root_node, nrel_xvm, tam_entry)
+            for obj in models.objects:
+                if not obj.parent:
+                    obj.parent = chunk_root
+                    obj["tree_offset"] = hex(tree.get_offset())
+
+                rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
+                # Deliberately NOT setting is_nrel = True here, unlike the static loop above: that
+                # flag is what ExportRel.export_all_by_tags() (rel_export_menu.py) scans the whole
+                # view layer for to decide what to write - since write() doesn't serialize
+                # animated_mesh_trees yet, letting these objects opt into that scan made ExportRel
+                # sweep them into an ordinary chunk re-grouping/export pass they were never meant for
+                # (confirmed live: real warnings from assign_objects_to_chunks and missing-UV mesh
+                # export validation firing on these objects). Leaving is_nrel at its False default
+                # keeps them purely visual/import-only until real export support exists.
+                rel_settings.receives_fog = not bool(tree.tree_flags & MeshTreeFlag.NO_FOG)
+                rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
+                rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
+                rel_settings.is_stenciled = bool(tree.tree_flags & MeshTreeFlag.IS_STENCILED)
+                obj["orig_tree_flags"] = tree.tree_flags
+                # Not yet understood (see AnimatedMeshTree's docstring) - stashed as pso_-prefixed
+                # addon-interpreted data (not a settled file round-trip field) so it's available for
+                # a future investigation pass without needing to re-import.
+                obj["pso_anim_speed"] = tree.anim_speed
+                obj["pso_anim_unk_a"] = tree.unk_a
+                obj["pso_anim_unk_b"] = tree.unk_b
+                obj["pso_anim_flags"] = tree.anim_flags
+                anim_coll.objects.link(obj)
+            bpy.data.collections.remove(models)
+            anim_counter += 1
             yield
 
 
