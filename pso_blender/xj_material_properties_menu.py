@@ -117,6 +117,19 @@ def _set_generate_mipmaps(self: bpy.types.PropertyGroup, value: bool):
         group_tree["generate_mipmaps"] = value
 
 
+def _get_force_uncompressed(self: bpy.types.PropertyGroup) -> bool:
+    group_tree = util.find_material_img_group_tree(cast(bpy.types.Material, self.id_data))
+    if group_tree is None:
+        return False
+    return bool(group_tree.get("force_uncompressed", False))
+
+
+def _set_force_uncompressed(self: bpy.types.PropertyGroup, value: bool):
+    group_tree = util.find_material_img_group_tree(cast(bpy.types.Material, self.id_data))
+    if group_tree is not None:
+        group_tree["force_uncompressed"] = value
+
+
 def _get_animation_frame_delay(self: bpy.types.PropertyGroup) -> int:
     # Real animated .tam data (map_desert03, map_acity) always uses one uniform delay across
     # every frame of a given animation - never a different value per frame - so a single shared
@@ -159,6 +172,20 @@ class XjMaterialSettings(bpy.types.PropertyGroup):
         items=AlphaCompression_items,
         get=_get_alpha_compression,
         set=_set_alpha_compression)
+    # Shared across every material variant of this texture, same reasoning as generate_mipmaps.
+    # Manual escape hatch for content DXT1/2/3's shared 4-colors-per-4x4-block RGB limit visibly
+    # degrades (confirmed live: a saturated icon, high-frequency noise/foam patterns) - checked
+    # before any DXT format decision in make_xvr() (xvm.py), so alpha_compression above becomes
+    # moot when this is on. Not automatic on purpose (matches this addon's established
+    # auto-detect-plus-manual-override pattern elsewhere) - deliberately per-texture, not a global
+    # switch, since uncompressed is 4-8x the size of DXT1 for the same texture.
+    force_uncompressed: BoolProperty(
+        name="Force Uncompressed",
+        description="Store this texture as raw A8R8G8B8 instead of DXT-compressing it - guarantees "
+                     "exact color, at roughly 4-8x the size of DXT1/DXT3 for the same texture. Matches "
+                     "what the original game itself does for a handful of its own textures.",
+        get=_get_force_uncompressed,
+        set=_set_force_uncompressed)
     # Shared across every material variant of this texture, same reasoning as generate_mipmaps -
     # only meaningful (and only shown, see XjMaterialSettingsPanel.draw) when the texture is an
     # imported animated sequence (image.source == "SEQUENCE").
@@ -511,6 +538,7 @@ class XjMaterialSettingsPanel(bpy.types.Panel):
             settings = cast(MaterialWithXjSettings, context.material).xj_settings
             self.layout.prop(settings, "generate_mipmaps")
             self.layout.prop(settings, "alpha_compression")
+            self.layout.prop(settings, "force_uncompressed")
             diffuse_image = util.find_diffuse_image(context.material)
             if diffuse_image is not None and diffuse_image.source == "SEQUENCE":
                 self.layout.prop(settings, "animation_frame_delay")

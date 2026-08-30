@@ -1,12 +1,17 @@
 from collections.abc import Generator, Sequence
 from functools import cache
 import math, re
-from typing import Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
 from mathutils import Euler, Vector, Matrix
 import bpy.types
 from abc import ABC, abstractmethod
 
 from .serialization import Serializable
+
+if TYPE_CHECKING:
+    # xvm.py imports Texture from this module - only importable here under TYPE_CHECKING to avoid
+    # a circular import at runtime.
+    from .xvm import Xvr
 
 
 T = TypeVar("T", bound=int | float)
@@ -166,11 +171,28 @@ class Texture:
     has_alpha: bool
     image: bpy.types.Image
     animation_frames: int
+    # Only meaningful when animation_frames > 0 (this Texture is an animated base/frame-0 entry).
+    # Deliberately separate from .id: .id identifies this texture's CONTENT (shared across
+    # placements with byte-identical frames, see xvm.TextureRegistry), while this identifies the
+    # ANIMATION INSTANCE (one per object/placement, always unique, even when two placements share
+    # identical frame content but legitimately need their own timing/delay in the .tam) - conflating
+    # the two would silently merge two differently-timed animations into one .tam entry whenever
+    # their frames happened to be pixel-identical.
+    animation_instance_id: int
+    # Set only for a position preserved byte-for-byte from an original source .xvm that nothing in
+    # the current scene touches (see TextureManager.__init__, xvm.py) - when set, get_or_make_xvr()
+    # returns this exact Xvr (just re-numbered .id) instead of re-encoding .image through make_xvr(),
+    # since decoding then recompressing an untouched original is real, avoidable lossy rework (DXT1
+    # is inherently lossy - confirmed live, a freshly recompressed passthrough measurably differed
+    # from the original even though nothing was edited).
+    prebuilt_xvr: "Xvr | None"
 
     _alpha_check_cache: ClassVar[dict[str, bool]] = dict()
 
     def __init__(self, *, id: int, material_name: str, image: bpy.types.Image, generate_mipmaps: bool=False, animation_frames: int=0):
         self.id = id
+        self.animation_instance_id = -1
+        self.prebuilt_xvr = None
         # bpy.path.abspath(image.filepath), NOT image.filepath_from_user() - the latter resolves
         # dynamically against the CURRENT scene frame + a generic default ImageUser, and only
         # starts doing so once the image has actually been evaluated for display (e.g. Material

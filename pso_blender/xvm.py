@@ -185,7 +185,13 @@ class Xvm(Serializable):
 
 class TextureManager:
     _base_id: int
-    _textures_by_name: dict[str, Texture]
+    _registry: "TextureRegistry"
+    # Per animated base texture (keyed by its own .name, same as before), the ordered list of its
+    # frames' final ids (post content-dedup, so a frame shared with a different animation_id's
+    # identical content already reflects that) - tam.write() needs these directly instead of
+    # assuming a contiguous id range starting at the base texture's own id (see
+    # get_animated_texture_frame_ids).
+    _frame_ids_by_base_name: dict[str, list[int]]
     _has_anim_tex: bool = False
     # Tracked by name, not by Image reference: the same animated texture is shared by many
     # objects, so this list can and does accumulate the same frame more than once (each already
@@ -196,8 +202,8 @@ class TextureManager:
     def __init__(self, objects: list[bpy.types.Object]):
         # Create "unique" texture IDs
         self._base_id = int(time.time()) & 0xffffffff
-        id_counter = self._base_id
-        self._textures_by_name = dict()
+        self._registry = TextureRegistry(self._base_id)
+        self._frame_ids_by_base_name = dict()
         # Frame images loaded below purely to read their pixels into the exported .xvm - not
         # referenced by any material/node, so nothing else keeps them alive once export is done.
         # Tracked here so cleanup_ephemeral_images() can remove them afterward instead of leaving
@@ -206,8 +212,18 @@ class TextureManager:
 
         get_object_diffuse_textures.cache_clear()
 
+        # A fresh, always-unique id per animated placement (one per object, assigned below) -
+        # deliberately separate from the content-deduped .id a Texture gets from _registry, so two
+        # placements whose frames happen to be byte-identical still get their own .tam entry (their
+        # playback timing is a genuine per-instance property, independent of texture content).
+        animation_instance_id_counter = self._base_id
+
         # First find all textures in given objects
         all_textures: list[Texture] = []
+        # Frame-expansion order per base texture, tracked separately from all_textures (which gets
+        # sorted below) - get_animated_texture_frame_ids() needs each animation's frames in actual
+        # playback order (frame 0, 1, 2, ...), not final array order.
+        frames_by_base_name: dict[str, list[Texture]] = {}
         for obj in objects:
             textures = get_object_diffuse_textures(obj)
             for tex in textures:
@@ -216,8 +232,11 @@ class TextureManager:
                     # Get animated textures
                     frames = get_image_sequence_images(tex.image)
                     tex.animation_frames = len(frames)
+                    tex.animation_instance_id = animation_instance_id_counter
+                    animation_instance_id_counter += 1
                     orig_seq_image = tex.image
                     all_textures.append(tex)
+                    frames_by_base_name[tex.name] = [tex]
                     for i, frame in enumerate(frames):
                         # check_existing (see get_image_sequence_images) means frame 0 resolves to
                         # the exact same datablock as tex.image itself (loaded from the identical
@@ -244,11 +263,55 @@ class TextureManager:
                         orig_tex_id = orig_seq_image.get("pso_orig_tex_id")
                         if orig_tex_id is not None:
                             frame["pso_orig_tex_id"] = orig_tex_id
-                        all_textures.append(
-                            Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame))
+                        frame_tex = Texture(id=-1, material_name=tex.material_name, generate_mipmaps=tex.generate_mipmaps, image=frame)
+                        all_textures.append(frame_tex)
+                        frames_by_base_name[tex.name].append(frame_tex)
                 else:
                     all_textures.append(tex)
-        
+
+        # Preserve any original texture-array position the current scene doesn't reference at all.
+        # TEXTURE_ID is a raw array index (xj_xvm.xvrs[tex_id], xj.py:1343) - silently dropping an
+        # unreferenced position would shift every later one, corrupting anything else that indexes
+        # into this same source .xvm by original position (another map segment, or c.rel/r.rel,
+        # sharing it). Confirmed real on map_acity00: 21 of 246 original positions have no
+        # material/image anywhere in the scene, even at import time - genuinely orphaned as far as
+        # this map segment's own geometry is concerned, but still real content elsewhere.
+        source_xvm_path = _find_common_source_xvm_path(all_textures)
+        if source_xvm_path is not None:
+            # Two reads of the same file: decoded (read(), cached by mtime/size - cheap to call
+            # again) to build a real Image for the pixel-existence check and content-registry
+            # checksum below, and raw (read_raw(), never re-encoded) to carry the *exact original
+            # compressed bytes* through untouched via Texture.prebuilt_xvr - decoding and
+            # recompressing content nothing edited would be pure, avoidable DXT1 loss (confirmed
+            # live: a freshly recompressed passthrough measurably differed from the original), and
+            # would silently convert any raw R5G6B5/A1R5G5B5 original into DXT since make_xvr()
+            # can't re-encode those formats at all.
+            decoded_base_xvm = read(source_xvm_path)
+            raw_base_xvm = read_raw(source_xvm_path)
+            covered_positions: set[int] = set()
+            for tex in all_textures:
+                orig_id = tex.image.get("pso_orig_tex_id")
+                if orig_id is not None:
+                    covered_positions.add(int(orig_id))
+            base_name = os.path.splitext(os.path.basename(source_xvm_path))[0]
+            for i, base_xvr in enumerate(decoded_base_xvm.xvrs):
+                if i in covered_positions:
+                    continue
+                passthrough_img = bpy.data.images.new(
+                    "{}_xvr_{}_orig".format(base_name, i),
+                    width=base_xvr.width, height=base_xvr.height,
+                    alpha=bool(base_xvr.flags & XvrFlags.ALPHA))
+                passthrough_img.pixels = base_xvr.data  # pyright: ignore[reportAttributeAccessIssue]
+                passthrough_img["pso_orig_tex_id"] = i
+                # Not referenced by any material/node - cleaned up the same way as the per-frame
+                # animated images (see cleanup_ephemeral_images), not left to accumulate.
+                self._ephemeral_frame_images.append(passthrough_img.name)
+                passthrough_tex = Texture(
+                    id=-1, material_name="", generate_mipmaps=bool(base_xvr.flags & XvrFlags.MIPMAPS),
+                    image=passthrough_img)
+                passthrough_tex.prebuilt_xvr = raw_base_xvm.xvrs[i]
+                all_textures.append(passthrough_tex)
+
         # Sort textures close to their original relative position in the source .xvm (tracked via
         # pso_orig_tex_id, stashed on import - see make_material/get_or_build_animated_texture_
         # image in xj.py) instead of purely alphabetically by material name, which restructured
@@ -263,49 +326,61 @@ class TextureManager:
             return (0, int(orig_id), tex.material_name)
         all_textures.sort(key=texture_sort_key)
 
-        # Try deduplicate textures
+        # Deduplicate by actual content (texture_checksum - pixels, mipmap flag, Mapping
+        # transform, alpha_compression: everything that affects the final compressed bytes), not
+        # by image path - two different animation_id's that happen to play byte-identical frames
+        # must collapse to one shared texture id, matching how the original game's own files never
+        # duplicate texture content (confirmed on real map data: 0 duplicates across 246 entries),
+        # no matter how many places one animation is placed. See TextureRegistry above.
         for tex in all_textures:
             w, h = tex.image.size
             # If the image file is not found on disk the texture will still exist but without pixels
             if w == 0 or h == 0 or len(tex.image.pixels) < 1:  # pyright: ignore[reportArgumentType]
                 raise Exception("Error in texture '{}': Texture has no pixels. Does the image file exist on disk?".format(tex.image.filepath))
-            else:
-                image_name = tex.name
-                if image_name not in self._textures_by_name:
-                    tex.id = id_counter # Assign ID
-                    self._textures_by_name[image_name] = tex
-                    id_counter += 1
+            self._registry.register(tex)  # Mutates tex.id in place, even when tex ends up a duplicate.
+
+        # Now that every Texture's .id reflects its real (possibly shared) content id, record each
+        # animation's frame ids in playback order for get_animated_texture_frame_ids() below.
+        for base_name, frame_texs in frames_by_base_name.items():
+            self._frame_ids_by_base_name[base_name] = [t.id for t in frame_texs]
 
     def get_object_textures(self, obj: bpy.types.Object) -> list[Texture]:
         # Multiple material variants (different blend mode/addressing) of the same physical
-        # texture can share one underlying image, deduplicated by image name in __init__ - only
-        # the FIRST material encountered for a given image gets registered into
-        # _textures_by_name, and its .material_name reflects that first material only. Returning
-        # that shared instance as-is here would silently carry the wrong .material_name for every
-        # other object/material using the same image - write_index_buffers matches strips to
-        # textures by material name, so a wrong .material_name there causes a strip's texture
-        # lookup to fail (dropped texture) or, if the wrong name happens to also collide with a
-        # different real material on this same object, latch onto that unrelated texture instead.
-        # get_object_diffuse_textures(obj) already builds a fresh Texture per this object's own
-        # material slots with the correct .material_name - only .id needs to come from the
-        # deduplicated/canonical entry (the actual shared texture id every variant must agree on).
+        # texture can share one underlying image, deduplicated by content in __init__ - only the
+        # FIRST material encountered for a given content gets registered as canonical, and its
+        # .material_name reflects that first material only. Returning that shared instance as-is
+        # here would silently carry the wrong .material_name for every other object/material using
+        # the same content - write_index_buffers matches strips to textures by material name, so a
+        # wrong .material_name there causes a strip's texture lookup to fail (dropped texture) or,
+        # if the wrong name happens to also collide with a different real material on this same
+        # object, latch onto that unrelated texture instead. get_object_diffuse_textures(obj)
+        # already builds a fresh Texture per this object's own material slots with the correct
+        # .material_name - only .id needs to come from the deduplicated/canonical entry (the actual
+        # shared texture id every variant must agree on).
         textures: list[Texture] = []
         all_textures = get_object_diffuse_textures(obj)
         for tex in all_textures:
-            canonical = self._textures_by_name.get(tex.name)
+            canonical = self._registry.get_by_checksum(tex)
             if canonical is not None:
                 tex.id = canonical.id
                 textures.append(tex)
         return textures
-    
+
+    def get_animated_texture_frame_ids(self, anim_tex: Texture) -> list[int]:
+        """The real, possibly-shared texture id for each of anim_tex's frames, in playback order -
+        tam.write() must reference these directly instead of assuming a contiguous id range
+        starting at anim_tex.id (frame content is now deduped independently of animation
+        instance - see TextureRegistry / Texture.animation_instance_id)."""
+        return self._frame_ids_by_base_name[anim_tex.name]
+
     def get_all_textures(self) -> list[Texture]:
-        return list(self._textures_by_name.values())
+        return self._registry.canonical_textures()
 
     def get_base_id(self) -> int:
         return self._base_id
-    
+
     def has_textures(self) -> bool:
-        return len(self._textures_by_name) > 0
+        return len(self._registry.canonical_textures()) > 0
     
     def object_has_textures(self, obj: bpy.types.Object) -> bool:
         return len(get_object_diffuse_textures(obj)) > 0
@@ -345,27 +420,25 @@ class TextureManager:
 # cache) looking pixelated/lower quality than a standalone Export XVM (which always calls
 # make_xvr() directly, bypassing the cache) on maps exported before the gamma-correct mip
 # averaging / DXT1 punch-through fixes landed.
-CACHE_FORMAT_VERSION = 2
+CACHE_FORMAT_VERSION = 13
 
 
 def texture_checksum(tex: Texture) -> str:
+    # Mirrors make_xvr()'s own pixel-source logic exactly (bake_texture_group first, tex.image
+    # otherwise) - a previous version of this function read straight from the material's shared
+    # ImgGroup node tree whenever one existed, regardless of tex.image, which silently computed the
+    # SAME checksum for every distinct frame Texture of one animation (they all share one
+    # material_name/group_tree) - confirmed live: a 3-frame animation's frames all collapsed onto
+    # one shared texture_index instead of the 3 distinct ones they need. bake_texture_group()
+    # itself already has a cheap early-exit for the common "not customized" case (most textures),
+    # so calling it here too costs nothing extra there.
     mat = bpy.data.materials.get(tex.material_name)
     group_tree = find_material_img_group_tree(mat) if mat is not None else None
+    img_width, img_height = tex.image.size
+    baked = bake_texture_group(group_tree, img_width, img_height) if group_tree is not None else None
     data: list[float] = [float(CACHE_FORMAT_VERSION)]
-    if group_tree is not None:
-        # Generic, not hardcoded to "the diffuse image" - make_xvr() may bake the group's actual
-        # Color/Alpha output instead of reading tex.image directly once it's been customized (see
-        # bake_texture_group), so *any* Image Texture node inside the group (PSO_Diffuse, or a
-        # relief composite's PSO_Normal/PSO_Metal, or any future manual node addition) can affect
-        # what actually gets exported - all of them need to invalidate the cache, not just the one
-        # this Texture happens to point at. Sorted by name for a deterministic checksum regardless
-        # of node creation/iteration order.
-        for node in sorted(group_tree.nodes, key=lambda n: n.name):
-            if node.type != "TEX_IMAGE":
-                continue
-            image = cast(bpy.types.ShaderNodeTexImage, node).image
-            if image is not None:
-                data.extend(list(cast(Any, get_stable_source_image(image)).pixels))
+    if baked is not None:
+        data.extend(baked)
     else:
         data.extend(list(cast(Any, get_stable_source_image(tex.image)).pixels))
     data.append(float(tex.generate_mipmaps))
@@ -380,7 +453,80 @@ def texture_checksum(tex: Texture) -> str:
         # make_xvr() picks without touching any pixel - without this, the cache would keep
         # serving a stale .xvr compressed under the old format.
         data.append(float(AlphaCompression[cast(MaterialWithXjSettings, mat).xj_settings.alpha_compression].value))
+        # Same reasoning - toggling force_uncompressed switches the whole format (DXT vs raw
+        # A8R8G8B8) without touching a single pixel.
+        data.append(float(cast(MaterialWithXjSettings, mat).xj_settings.force_uncompressed))
     return hashlib.md5(marshal.dumps(data)).hexdigest()
+
+
+def get_original_pso_id_and_source(material_name: str) -> "tuple[int, str] | None":
+    """Recovers the exact Xvr.id a material's texture had, and the full path of the .xvm it was
+    originally imported from (xj.py's importer stores both on the material as
+    xj_settings.pso_id / xj_settings.source_xvm_path). Shared by ExportXvm (standalone - needs to
+    carry an existing .xvm's untouched slots through unchanged) and TextureManager (REL export -
+    same need, see the position-preserving pass in __init__ below)."""
+    mat = bpy.data.materials.get(material_name)
+    if mat is None:
+        return None
+    settings = cast(MaterialWithXjSettings, mat).xj_settings
+    if settings.pso_id < 0 or not settings.source_xvm_path:
+        return None
+    return (settings.pso_id, settings.source_xvm_path)
+
+
+def _find_common_source_xvm_path(textures: "list[Texture]") -> "str | None":
+    """The single .xvm this export's materials were all originally imported from, if there is
+    exactly one and it's unambiguous - used to preserve untouched original texture-array positions
+    (see TextureManager.__init__ below). Mirrors ExportXvm's own ambiguity handling: silently skips
+    (falls back to today's scene-only behavior) rather than guessing, whenever there's no
+    resolvable source (freshly authored content) or more than one (e.g. multiple maps loaded into
+    the same Blender file at once)."""
+    source_paths: set[str] = set()
+    for tex in textures:
+        resolved = get_original_pso_id_and_source(tex.material_name)
+        if resolved is not None:
+            source_paths.add(resolved[1])
+    if len(source_paths) != 1:
+        return None
+    path = next(iter(source_paths))
+    return path if os.path.isfile(path) else None
+
+
+class TextureRegistry:
+    """Content-addressed dedup for one export run - two Texture objects with the same
+    texture_checksum() (same pixels, mipmap flag, Mapping transform, and alpha_compression, i.e.
+    everything that actually affects the compressed bytes) are the same texture regardless of which
+    material/animation/placement reached them, and must share one id. Reused by both TextureManager
+    (REL map export) and ExportXvm (standalone) instead of each maintaining its own, weaker,
+    identity-based dedup (by image path, or by pso_id+image name) - confirmed on real map data that
+    those miss real duplicates (e.g. two different animation_id's that happen to play byte-identical
+    frames), while the original game's own .xvm files never duplicate texture content at all."""
+    _next_id: int
+    _by_checksum: dict[str, Texture]
+
+    def __init__(self, base_id: int):
+        self._next_id = base_id
+        self._by_checksum = {}
+
+    def register(self, tex: Texture) -> Texture:
+        """Assigns tex.id - reusing an existing entry's id if this exact content was already seen,
+        or minting a fresh one otherwise - and returns the canonical Texture for this content
+        (either tex itself, or the earlier entry it now duplicates)."""
+        checksum = texture_checksum(tex)
+        existing = self._by_checksum.get(checksum)
+        if existing is not None:
+            tex.id = existing.id
+            return existing
+        tex.id = self._next_id
+        self._next_id += 1
+        self._by_checksum[checksum] = tex
+        return tex
+
+    def get_by_checksum(self, tex: Texture) -> Texture | None:
+        return self._by_checksum.get(texture_checksum(tex))
+
+    def canonical_textures(self) -> list[Texture]:
+        return list(self._by_checksum.values())
 
 
 def load_cache_index(path: str) -> dict[str, str]:
@@ -750,7 +896,17 @@ def make_xvr(tex: Texture) -> Xvr:
     # (unmultiplied, unlike DXT2), whenever its alpha channel turns out to have genuine gradation
     # rather than just a hard cutout mask - see xj_material_properties_menu.AlphaCompression for
     # the per-texture override that lets this auto-detection be forced either way.
-    if is_premultiplied:
+    force_uncompressed = mat is not None and cast(MaterialWithXjSettings, mat).xj_settings.force_uncompressed
+    if force_uncompressed:
+        # Manual per-texture escape hatch (xj_material_properties_menu.XjMaterialSettings) for
+        # content DXT1/2/3's shared 4-colors-per-4x4-block RGB limit visibly degrades (confirmed
+        # live: a saturated, high-contrast icon-style texture) - checked before any DXT branch
+        # below, since none of that logic applies once nothing is being compressed at all. Matches
+        # what the original game already does for a handful of its own textures (real map data,
+        # aforest01: 2 high-frequency noise/foam textures stored raw instead of DXT), not a
+        # deviation from the format.
+        xvr_format = XvrFormat.A8R8G8B8
+    elif is_premultiplied:
         xvr_format = XvrFormat.DXT2
     elif not tex.has_alpha:
         xvr_format = XvrFormat.DXT1
@@ -782,6 +938,8 @@ def make_xvr(tex: Texture) -> Xvr:
             xvr_format = XvrFormat.DXT1
 
     def compress(px: list[float], w: int, h: int, channels: int) -> bytearray:
+        if xvr_format == XvrFormat.A8R8G8B8:
+            return xvm_dxt.pack_a8r8g8b8(px, w, h, channels)
         if xvr_format in (XvrFormat.DXT2, XvrFormat.DXT3):
             return xvm_dxt.compress_image_dxt3(px, w, h, channels)
         return xvm_dxt.compress_image(px, w, h, channels, tex.has_alpha)
@@ -862,6 +1020,14 @@ def get_or_make_xvr(tex: Texture, cache_dir_path: str) -> Xvr:
     served by REL export while a standalone Export XVM (which used to call make_xvr() directly,
     bypassing the cache) always looked correct - see CACHE_FORMAT_VERSION and texture_checksum().
     """
+    if tex.prebuilt_xvr is not None:
+        # Already-compressed bytes carried through untouched from a source .xvm (see
+        # Texture.prebuilt_xvr) - reuse them exactly rather than decoding and recompressing
+        # through make_xvr(), which would introduce real, avoidable DXT1 loss for content nothing
+        # actually changed. Never goes through the disk cache either - there's nothing to encode.
+        xvr = tex.prebuilt_xvr
+        xvr.id = tex.id
+        return xvr
     xvr_ext = ".xvr"
     pathlib.Path(cache_dir_path).mkdir(parents=True, exist_ok=True)  # Create dir if not exist
     (_, basename) = os.path.split(tex.name)
@@ -957,6 +1123,8 @@ def read(path: str) -> Xvm:
             pixels = read_rgb565_texture(compressed_data)
         elif xvr.format == XvrFormat.A1R5G5B5:
             pixels = read_argb1555_texture(compressed_data)
+        elif xvr.format == XvrFormat.A8R8G8B8:
+            pixels = xvm_dxt.decode_a8r8g8b8(compressed_data, xvr.width, xvr.height)
         else:
             warnings.warn("Unsupported XVR format: {}".format(xvr.format))
             pixels = bytearray()

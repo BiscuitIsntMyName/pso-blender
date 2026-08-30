@@ -5,25 +5,7 @@ from bpy.types import Context, Operator
 from bpy.props import StringProperty  # pyright: ignore[reportUnknownVariableType]
 from . import xvm, util
 from .util import ModalStepOperator
-from .xj_material_properties_menu import MaterialWithXjSettings
-
-
-def get_original_pso_id_and_source(material_name: str) -> tuple[int, str] | None:
-    """Recovers the exact Xvr.id a material's texture had, and the full path of the .xvm it was
-    originally imported from (xj.py's importer stores both on the material as
-    xj_settings.pso_id / xj_settings.source_xvm_path). Needed because a standalone XVM export is
-    meant to replace an existing game .xvm while leaving the .xj/.rel mesh files untouched -
-    those still reference the *original* PSO ids and slot positions, so the new .xvm must be
-    built by carrying that original file's untouched textures through unchanged and only
-    substituting the replaced ones.
-    """
-    mat = bpy.data.materials.get(material_name)
-    if mat is None:
-        return None
-    settings = cast(MaterialWithXjSettings, mat).xj_settings
-    if settings.pso_id < 0 or not settings.source_xvm_path:
-        return None
-    return (settings.pso_id, settings.source_xvm_path)
+from .xvm import get_original_pso_id_and_source
 
 
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false

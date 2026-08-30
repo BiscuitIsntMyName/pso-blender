@@ -100,16 +100,25 @@ def write(tam_path: str, texture_man: TextureManager, objs: list[bpy.types.Objec
                      anim_tex.image.name, len(stashed_delays), anim_tex.animation_frames))
             stashed_delays = None
 
+        # Each frame's real (possibly shared) texture id, resolved from the export's content
+        # registry - NOT anim_tex.id + i, which assumed every animation's frames occupy a
+        # contiguous block of ids that nothing else could ever share. A frame reused byte-for-byte
+        # by another animation now correctly points at that shared id instead of getting its own
+        # redundant copy (see xvm.TextureRegistry).
+        frame_ids = texture_man.get_animated_texture_frame_ids(anim_tex)
+        base_id = texture_man.get_base_id()
         frames: list[Keyframe] = []
         for i in range(anim_tex.animation_frames):
-            # Assume frames are back to back in the texture archive
             delay = int(stashed_delays[i]) if stashed_delays is not None else 1
-            frames.append(Keyframe(texture_index=anim_tex.id - texture_man.get_base_id() + i, frame_delay=delay))
+            frames.append(Keyframe(texture_index=frame_ids[i] - base_id, frame_delay=delay))
 
         entry = TamEntry(
             frame_type=FrameType.SLIDESHOW,
             body_size=Keyframe.type_size() * len(frames) + 4,
-            animation_id=anim_tex.id & 0x7fff,
+            # animation_instance_id, NOT anim_tex.id - see the matching comment in n_rel.py
+            # (_write_impl) for why these two must stay unique per placement, independent of
+            # whether the underlying texture content is shared with another placement.
+            animation_id=anim_tex.animation_instance_id & 0x7fff,
             frame_count=len(frames),
             frames=frames)
         

@@ -423,9 +423,12 @@ def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.
             static_mesh_tree = MeshTree(tree_flags=tree_flags)
 
             if anim_tex:
-                # Just use the texture id as the animation id
+                # animation_instance_id, NOT anim_tex.id - the latter is now the texture's
+                # content id (shared across placements with byte-identical frames, see
+                # xvm.TextureRegistry), while this tree's own .tam entry must stay unique per
+                # placement even when its frame content happens to match another placement's.
                 static_mesh_tree.texture_animation_info = Ptr32(rel.write(
-                    TextureAnimationInfo(animation_id=anim_tex.id & 0x7fff)))
+                    TextureAnimationInfo(animation_id=anim_tex.animation_instance_id & 0x7fff)))
             
             # Start from any unrecognized eval_flags bits preserved from the original file (see
             # KNOWN_EVAL_FLAGS_MASK above), then OR in the known bits the UI actually exposes.
