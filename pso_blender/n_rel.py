@@ -79,6 +79,18 @@ class TextureAnimationInfo(Serializable):
     frame_delay: U32 = 0 # ...
 
 
+class RawBytes(Serializable):
+    """Writes an arbitrary byte blob verbatim, no reinterpretation. Used to round-trip
+    AnimatedMeshTree.unk1's referenced block byte-for-byte (see _animated_tree_part_names) without
+    needing to understand every header field's meaning first - deliberately dumb, same spirit as
+    AlignedString (serialization.py) but with no NUL terminator or string encoding involved."""
+    chars: list[Numeric.U8]
+
+    def __init__(self, data: bytes):
+        super().__init__()
+        self.chars = list(data)
+
+
 @dataclass
 class MeshTree(Serializable):
     root_node: Ptr32[xj.XjMeshTreeNode] = Ptr32(NULLPTR)
@@ -108,7 +120,14 @@ class AnimatedMeshTree(Serializable):
         just an observation worth keeping in mind for whoever digs into this next.
     """
     root_node: Ptr32[xj.XjMeshTreeNode] = Ptr32(NULLPTR)
-    unk1: U32 = 0
+    # Ptr32[RawBytes], not a plain U32 like MeshTree.unk1 above: this field's write position MUST be
+    # registered in the pointer relocation table (nonnull_pointer_member_offsets() only registers
+    # Ptr32-typed fields) or the game would load it as a raw file offset instead of a real runtime
+    # pointer - confirmed via the file's own relocation table that the original data always registers
+    # this position, so export has to match that. RawBytes as the pointee type is a placeholder (we
+    # never .deref() this field, always read it as a raw int - see _animated_tree_part_names) - it
+    # just needs to be SOME Ptr32[...] for the relocation-table check to fire.
+    unk1: Ptr32[RawBytes] = Ptr32(NULLPTR)
     texture_animation_info: Ptr32[TextureAnimationInfo] = Ptr32(NULLPTR)
     tree_flags: U32 = 0
     anim_speed: F32 = 0.0
@@ -135,9 +154,8 @@ def _uv_animation_part_names(buf: bytes, payload_offset: int, unk1: int) -> "tup
     file's shared name table - which two named sub-parts the UV scroll relates (e.g. "g032_Box03a" +
     "g032_hand"). No numeric speed/direction field has ever been found anywhere in this chain (checked
     thoroughly - see the wiki) - purely informational/for readability, not a settled round-trip field.
-    Only decoded for static MeshTree so far: AnimatedMeshTree's own unk1 is confirmed to be a real
-    pointer too, but leads to a differently-shaped, not-yet-decoded record (looks like a
-    pointer+count+flags triplet, not a name pair) - do not call this for animated trees."""
+    AnimatedMeshTree's own unk1 is a real pointer too, but leads to a differently-shaped record -
+    see _animated_tree_part_names below, don't call this one for animated trees."""
     if unk1 <= 0:
         return None
     off = payload_offset + unk1
@@ -149,6 +167,34 @@ def _uv_animation_part_names(buf: bytes, payload_offset: int, unk1: int) -> "tup
     if not name_a and not name_b:
         return None
     return (name_a or "", name_b or "")
+
+
+def _animated_tree_part_names(buf: bytes, unk1: int, max_names: int = 8) -> list[str]:
+    """Confirmed 2026-08-30 (see local-wiki/pages/rel.html) - AnimatedMeshTree.unk1 is a real
+    pointer too, but ABSOLUTE (not payload-relative like the static case). It points 16 bytes into
+    an 8xU32 header whose first few fields are still not understood (word[1] looked like a
+    "previous node" pointer at first glance, but following it one hop further lands in unrelated
+    data, so that's not a real chain to walk). For SOME chunks only, that header is immediately
+    followed by a chain of NUL-terminated identifier strings drawn from the same shared per-map
+    name table as the static UV case - e.g. acity chunk 40 (very plausibly the Guild door, matching
+    the "h32_hnt_door04" catalog entry found in the same name table) gives ("g032_Box03a",
+    "g032_hand"). Coverage is sparse - most animated trees checked so far (acity: 1/7 tree-groups,
+    aforest01: 1/1, acave01: 1/2) have an all-zero name area instead, which is the common case, not
+    a bug - this returns an empty list there. Names can be mixed-case (unlike the file-wide 245-name
+    catalog scan, which is lowercase-only and so misses names like "Box03a" - checked, that's the
+    only real miss out of 250 candidate strings in acity, the rest were binary-data false positives)."""
+    header_offset = unk1 - 16
+    if header_offset < 0 or header_offset + 32 > len(buf):
+        return []
+    names: list[str] = []
+    off = header_offset + 28
+    for _ in range(max_names):
+        name = _read_cstr(buf, off)
+        if name is None or not re.match(r"^[A-Za-z][A-Za-z0-9_]{2,}$", name):
+            break
+        names.append(name)
+        off += len(name) + 1
+    return names
 
 
 @dataclass
@@ -421,10 +467,10 @@ def assign_objects_to_chunks(objects: list[bpy.types.Object], chunk_markers: lis
     return chunk_to_children
 
 
-def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object]):
-    texture_man = xvm.TextureManager(objects)
+def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object], animated_objects: list[bpy.types.Object]):
+    texture_man = xvm.TextureManager(objects + animated_objects)
     try:
-        _write_impl(nrel_path, xvm_path, tam_path, objects, chunk_markers, texture_man)
+        _write_impl(nrel_path, xvm_path, tam_path, objects, chunk_markers, animated_objects, texture_man)
     finally:
         # Per-frame images TextureManager loaded solely to read animated textures' pixels into
         # the exported .xvm are never referenced by any material/node - remove them here rather
@@ -433,7 +479,7 @@ def write(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.
         texture_man.cleanup_ephemeral_images()
 
 
-def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object], texture_man: xvm.TextureManager):
+def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.types.Object], chunk_markers: list[bpy.types.Object], animated_objects: list[bpy.types.Object], texture_man: xvm.TextureManager):
     # obj.matrix_world (relied on below and in assign_objects_to_chunks for every object's real
     # world position) is lazily recomputed by Blender's dependency graph - it can still reflect a
     # stale pre-edit transform immediately after a script sets .location/.parent (e.g. right after
@@ -556,6 +602,115 @@ def _write_impl(nrel_path: str, xvm_path: str, tam_path: str, objects: list[bpy.
         # May be fewer than assign_objects_to_chunks originally counted, if any object above was
         # skipped - must match the real number of trees actually written, not the intended one.
         chunk.static_mesh_tree_count = len(static_mesh_trees)
+
+    # Animated mesh trees - see AnimatedMeshTree/is_animated_nrel (rel_properties_menu.py) for why
+    # only a scoped subset of animated objects ever reaches this point: rel_export_menu.py only
+    # collects objects with is_animated_nrel=True, which import only ever sets when a real name (and
+    # therefore a known-extent unk1 block) was found - see rel.html. Deliberately a separate pass,
+    # NOT going through assign_objects_to_chunks - these objects stay in their original chunk
+    # (parsed from their "chunk_<id>_animated" collection name) instead of being regrouped by
+    # proximity, which is exactly what produced real warnings the one time this was tried through
+    # the ordinary is_nrel/static path (see the animated-tree import loop's comment above).
+    chunk_by_id = {chunk.id: chunk for chunk in chunk_to_children}
+    animated_by_chunk_id: dict[int, list[bpy.types.Object]] = {}
+    for obj in animated_objects:
+        coll_name = obj.users_collection[0].name if obj.users_collection else ""
+        match = re.match(r"^chunk_(-?\d+)_animated$", coll_name.split(".")[0])
+        if not match:
+            warn("N.REL Warning: skipping animated object '{}' - not in a \"chunk_<id>_animated\" "
+                 "collection, can't tell which chunk it belongs to.".format(obj.name))
+            continue
+        animated_by_chunk_id.setdefault(int(match.group(1)), []).append(obj)
+
+    for chunk_id, anim_group_objects in animated_by_chunk_id.items():
+        chunk = chunk_by_id.get(chunk_id)
+        if chunk is None:
+            warn("N.REL Warning: skipping {} animated object(s) in chunk {} - no matching static "
+                 "chunk in this export.".format(len(anim_group_objects), chunk_id))
+            continue
+        chunk_world_pos = Vector((chunk.x, chunk.y, chunk.z))
+        animated_mesh_trees: list[AnimatedMeshTree] = []
+        for obj in anim_group_objects:
+            if obj.type != "MESH":
+                # xj.xj_to_blender_mesh (import) turns empty hierarchy nodes (joints/pivots with no
+                # geometry of their own - real animated trees can have these, unlike static ones
+                # tested so far) into non-mesh Empty objects, tagged is_animated_nrel the same as
+                # their mesh siblings since the import loop doesn't distinguish. This write path has
+                # no hierarchy support (same limitation as the static loop above - one flat
+                # AnimatedMeshTree per mesh object, no parent/child), so there's nothing to write for
+                # these - matrix_world already bakes in whatever transform the skipped empty parent
+                # contributed, so mesh position stays correct even without an explicit node for it.
+                continue
+            eval_obj = obj.evaluated_get(depsgraph)
+            blender_mesh = eval_obj.to_mesh()
+            util.scale_mesh(blender_mesh, util.get_pso_world_scale())
+            if len(blender_mesh.loop_triangles) < 1:
+                raise NrelError("Object has no faces.", obj=obj)
+
+            raw_hex = cast(str, obj.get("pso_anim_unk1_raw_hex", ""))
+            if not raw_hex:
+                # Shouldn't happen in practice - is_animated_nrel is only auto-set alongside this
+                # data - but a manually-checked object with no captured data would otherwise write
+                # unk1=0, which real map data never does and is unconfirmed to be safe (see
+                # rel.html - unlike the static case, nothing here is known to gate whether the
+                # client dereferences unk1).
+                warn("N.REL Warning: skipping animated object '{}' - no captured unk1 data "
+                     "(pso_anim_unk1_raw_hex), can't safely export it.".format(obj.name))
+                eval_obj.to_mesh_clear()
+                continue
+
+            anim_tex = texture_man.get_object_animated_texture(obj)
+            animated_tree = AnimatedMeshTree(
+                # Every real sample checked this session (104 across 3 maps) has tree_flags=0 - no
+                # round-trip from rel_settings here, there's nothing confirmed to encode into it yet.
+                tree_flags=0,
+                anim_speed=cast(float, obj.get("pso_anim_speed", 0.2)),
+                unk_a=cast(int, obj.get("pso_anim_unk_a", 0)),
+                unk_b=cast(int, obj.get("pso_anim_unk_b", 0)),
+                anim_flags=cast(int, obj.get("pso_anim_flags", 0x200000)))
+            if anim_tex:
+                animated_tree.texture_animation_info = Ptr32(rel.write(
+                    TextureAnimationInfo(animation_id=anim_tex.animation_instance_id & 0x7fff)))
+            # Preserve the captured unk1 block byte-for-byte at its new location - see RawBytes and
+            # the import-side capture above for why this is a raw copy, not a reconstruction.
+            block_ptr = rel.write(RawBytes(bytes.fromhex(raw_hex)), ensure_aligned=True)
+            animated_tree.unk1 = Ptr32(block_ptr + 16)
+
+            eval_flags = cast(int, obj.get("orig_eval_flags", 0)) & ~KNOWN_EVAL_FLAGS_MASK
+            for flag_name in cast(set[str], cast(ObjectWithNjcmSettings, obj).njcm_settings.eval_flags):
+                eval_flags |= getattr(NinjaEvalFlag, flag_name).value
+            mesh_world_pos = util.from_blender_axes(obj.matrix_world.translation * util.get_pso_world_scale())
+            rot = obj.rotation_euler
+            mesh_node = xj.XjMeshTreeNode(
+                eval_flags=eval_flags,
+                rot_x=round(rot.x / math.pi * 0x7fff),
+                rot_z=round(rot.y / math.pi * -0x7fff),
+                rot_y=round(rot.z / math.pi * 0x7fff),
+                scale_x=obj.scale.x,
+                scale_z=obj.scale.y,
+                scale_y=obj.scale.z,
+                x=mesh_world_pos.x - chunk_world_pos.x,
+                y=mesh_world_pos.y - chunk_world_pos.y,
+                z=mesh_world_pos.z - chunk_world_pos.z)
+            try:
+                mesh = xj.make_mesh(rel, obj, blender_mesh, texture_man, bake_object_transform=False)
+            except Exception as ex:
+                warn("N.REL Warning: skipping animated object '{}' - {}".format(obj.name, ex))
+                eval_obj.to_mesh_clear()
+                continue
+            mesh_node.mesh = Ptr32(rel.write(mesh))
+            animated_tree.root_node = Ptr32(rel.write(mesh_node))
+            animated_mesh_trees.append(animated_tree)
+            eval_obj.to_mesh_clear()
+
+        first_animated_tree_ptr = NULLPTR
+        for tree in animated_mesh_trees:
+            ptr = rel.write(tree)
+            if first_animated_tree_ptr == NULLPTR:
+                first_animated_tree_ptr = ptr
+        chunk.animated_mesh_trees = Ptr32(first_animated_tree_ptr)
+        chunk.animated_mesh_tree_count = len(animated_mesh_trees)
+
     # Write chunks back to back
     first_chunk_ptr = NULLPTR
     for chunk in chunk_to_children:
@@ -704,11 +859,12 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
             yield
 
         # Animated mesh trees - doors/moving props. Confirmed-working geometry parse (2026-08-30, see
-        # AnimatedMeshTree above and local-wiki/pages/rel.html) but import-only for now: write() does
-        # not yet serialize this list back out, so round-tripping one of these maps still silently
-        # drops this content on export (tracked in the backlog). Kept in a separate sibling collection
-        # rather than mixed into chunk_coll, so this newly-readable-but-still-experimental content
-        # stays independently toggleable from the confirmed static architecture.
+        # AnimatedMeshTree above and local-wiki/pages/rel.html). Export exists (2026-08-30) but only
+        # for the subset where a real name was found at import (unk1's target blob's exact extent is
+        # only known in that case - see _animated_tree_part_names and rel.html for why the rest is
+        # still excluded). Kept in a separate sibling collection rather than mixed into chunk_coll, so
+        # this still-experimental content stays independently toggleable from the confirmed static
+        # architecture.
         anim_coll: bpy.types.Collection | None = None
         anim_counter = 0
         for tree in chunk.animated_mesh_trees.deref_array(chunk.animated_mesh_tree_count):
@@ -727,21 +883,26 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
             if anim_coll is None:
                 anim_coll = bpy.data.collections.new("chunk_" + str(chunk.id) + "_animated")
                 collection.children.link(anim_coll)
-            models = xj.xj_to_blender_mesh("{}_anim_{}".format(chunk.id, anim_counter), root_node, nrel_xvm, tam_entry)
+            anim_names = _animated_tree_part_names(rel.buf.buffer, tree.unk1)
+            anim_tree_name = "{}_anim_{}".format(chunk.id, anim_counter)
+            if anim_names:
+                # Same readability convention as the static UV loop above - not a settled naming
+                # convention, just makes these objects recognizable in the Outliner.
+                anim_tree_name += "_" + anim_names[0]
+            models = xj.xj_to_blender_mesh(anim_tree_name, root_node, nrel_xvm, tam_entry)
             for obj in models.objects:
                 if not obj.parent:
                     obj.parent = chunk_root
                     obj["tree_offset"] = hex(tree.get_offset())
 
                 rel_settings = cast(ObjectWithRelSettings, obj).rel_settings
-                # Deliberately NOT setting is_nrel = True here, unlike the static loop above: that
-                # flag is what ExportRel.export_all_by_tags() (rel_export_menu.py) scans the whole
-                # view layer for to decide what to write - since write() doesn't serialize
-                # animated_mesh_trees yet, letting these objects opt into that scan made ExportRel
-                # sweep them into an ordinary chunk re-grouping/export pass they were never meant for
-                # (confirmed live: real warnings from assign_objects_to_chunks and missing-UV mesh
-                # export validation firing on these objects). Leaving is_nrel at its False default
-                # keeps them purely visual/import-only until real export support exists.
+                # is_nrel is NOT set here (only alongside is_animated_nrel below, when a name chain
+                # was actually captured) - a bare is_nrel=True on every animated object would make
+                # ExportRel.export_all_by_tags() (rel_export_menu.py) route it through the ordinary
+                # static/proximity-based chunk-regrouping path, which produced real warnings the one
+                # time this was tried (assign_objects_to_chunks, missing-UV mesh export validation).
+                # is_animated_nrel is a sub-classifier read by that same scan to redirect to the
+                # separate write path instead - see rel_export_menu.py.
                 rel_settings.receives_fog = not bool(tree.tree_flags & MeshTreeFlag.NO_FOG)
                 rel_settings.receives_shadows = bool(tree.tree_flags & MeshTreeFlag.RECEIVES_SHADOWS)
                 rel_settings.is_stencil_viewer = bool(tree.tree_flags & MeshTreeFlag.IS_STENCIL_VIEWER)
@@ -754,6 +915,27 @@ def read_steps(path: str, nrel_xvm: xvm.Xvm | None, result: dict[str, Any], tam_
                 obj["pso_anim_unk_a"] = tree.unk_a
                 obj["pso_anim_unk_b"] = tree.unk_b
                 obj["pso_anim_flags"] = tree.anim_flags
+                if anim_names:
+                    obj["pso_anim_part_names"] = ", ".join(anim_names)
+                    # Raw-preserve the whole unk1-referenced block (header + name chain) byte for
+                    # byte - kept for future investigation, NOT currently written back out on export
+                    # (see is_animated_nrel below). Only captured here, where the block's exact extent
+                    # is knowable (32-byte header + the names' own bytes) - every other animated
+                    # tree's unk1 target has unknown extent, so nothing is captured for those.
+                    header_offset = int(tree.unk1) - 16
+                    block_len = 32 + sum(len(n) + 1 for n in anim_names)
+                    raw_block = bytes(rel.buf.buffer[header_offset:header_offset + block_len])
+                    obj["pso_anim_unk1_raw_hex"] = raw_block.hex()
+                    # NOT auto-set here anymore (2026-08-30) - CONFIRMED LIVE to crash the actual game
+                    # client on load, even for this scoped "we understand the name chain" subset. The
+                    # header's word[0]/word[1] (whichever is nonzero) turned out to also look like a
+                    # real pointer, not just word[4] as originally flagged - since the whole block is
+                    # preserved byte-for-byte rather than field-by-field, ANY embedded pointer inside
+                    # it keeps its OLD file's value after the block moves to a new offset, which is
+                    # exactly consistent with an immediate crash on map load. Left as a manual-only
+                    # override (rel_properties_menu.py) for anyone who wants to keep investigating,
+                    # but never auto-enabled again until the embedded pointers are actually understood
+                    # and correctly relocated instead of just copied.
                 anim_coll.objects.link(obj)
             bpy.data.collections.remove(models)
             anim_counter += 1

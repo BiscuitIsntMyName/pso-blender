@@ -10,6 +10,16 @@ from . import c_rel
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
 class MeshRelSettings(bpy.types.PropertyGroup):
     is_nrel: BoolProperty(name="N.REL")
+    is_animated_nrel: BoolProperty(
+        name="Animated N.REL (CONFIRMED to crash the game - do not use)",
+        description="Sub-classifier of N.REL, not an independent flag - only has any effect while "
+                    "N.REL is also checked. Routes this object through the animated/moving mesh tree "
+                    "export path (Chunk.animated_mesh_trees) instead of the ordinary static one. "
+                    "CONFIRMED LIVE (2026-08-30) to crash the actual game client on map load, even for "
+                    "the scoped subset with a recognized part name - see rel.html. No longer auto-set "
+                    "on import because of this. Left as a manual override purely for further "
+                    "investigation - do not check this for real testing/play.",
+        default=False)
     is_crel: BoolProperty(name="C.REL")
     is_rrel: BoolProperty(name="R.REL")
     receives_shadows: BoolProperty(name="Receives shadows", default=True)
@@ -83,6 +93,7 @@ class MeshNrelSettingsPanel(Panel):
             settings = cast(ObjectWithRelSettings, context.object).rel_settings
             self.layout.active = cast(bool, settings.is_nrel)
             col = self.layout.column(align=True)
+            col.prop(settings, "is_animated_nrel")
             col.prop(settings, "receives_shadows")
             col.prop(settings, "receives_fog")
             col.prop(settings, "is_translucent")

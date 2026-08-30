@@ -38,7 +38,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         self.report({"WARNING"}, msg)
         return {"CANCELLED"}
     
-    def export_all(self, minimap_objs: list[Object], render_objs: list[Object], collision_objs: list[Object], chunk_markers: list[Object]):
+    def export_all(self, minimap_objs: list[Object], render_objs: list[Object], collision_objs: list[Object], chunk_markers: list[Object], animated_render_objs: list[Object]):
         filepath = cast(str, self.filepath)
         noext, ext = os.path.splitext(filepath)
         # The file browser naturally leads users to pick one of the three existing sibling files
@@ -50,7 +50,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
             noext = noext[:-1]
         if minimap_objs and len(minimap_objs) > 0:
             r_rel.write(noext + "r" + ext, minimap_objs)
-        if render_objs and len(render_objs) > 0:
+        if (render_objs and len(render_objs) > 0) or (animated_render_objs and len(animated_render_objs) > 0):
             # A multi-segment map (e.g. map_acity00_00n.rel) shares a single .xvm across every
             # segment, named WITHOUT the "_00" segment suffix (map_acity00.xvm, not
             # map_acity00_00.xvm) - unlike the .rel/.tam siblings, which do carry it. Using noext
@@ -59,7 +59,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
             # ids) as what actually pairs with the freshly exported .rel in-game.
             (basedir, base_noext) = os.path.split(noext)
             xvm_noext = os.path.join(basedir, variantless_map_basename(base_noext))
-            n_rel.write(noext + "n" + ext, xvm_noext + ".xvm", noext + ".tam", render_objs, chunk_markers)
+            n_rel.write(noext + "n" + ext, xvm_noext + ".xvm", noext + ".tam", render_objs, chunk_markers, animated_render_objs)
         if collision_objs and len(collision_objs):
             c_rel.write(noext + "c" + ext, collision_objs)
         return {"FINISHED"}
@@ -72,12 +72,23 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
         collision_objs: list[Object] = []
         minimap_objs: list[Object] = []
         chunk_markers: list[Object] = []
+        animated_render_objs: list[Object] = []
         view_layer = bpy.context.view_layer
         if view_layer:
             for obj in view_layer.objects:
                 obj = cast(ObjectWithRelSettings, obj)
                 if obj.rel_settings.is_nrel:
-                    render_objs.append(obj)
+                    # is_animated_nrel is a sub-classifier of is_nrel, not an independent flag - an
+                    # object checks BOTH (import sets them together, see n_rel.py), so the N.REL
+                    # header checkbox stays visually honest about "is this object part of N.REL at
+                    # all" while still routing to a different write path under the hood. Routing an
+                    # animated object into render_objs too would sweep it into the ordinary
+                    # proximity-based chunk-regrouping path - the exact bug already hit once this
+                    # session - so it's one or the other, never both lists.
+                    if obj.rel_settings.is_animated_nrel:
+                        animated_render_objs.append(obj)
+                    else:
+                        render_objs.append(obj)
                 if obj.rel_settings.is_crel:
                     collision_objs.append(obj)
                 if obj.rel_settings.is_rrel:
@@ -86,7 +97,7 @@ class ExportRel(Operator, ExportHelper):  # pyright: ignore[reportIncompatibleMe
                     chunk_markers.append(obj)
         else:
             return {"CANCELLED"}
-        return self.export_all(minimap_objs, render_objs, collision_objs, chunk_markers)
+        return self.export_all(minimap_objs, render_objs, collision_objs, chunk_markers, animated_render_objs)
 
     def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
         with catch_warnings(record=True) as warnings:

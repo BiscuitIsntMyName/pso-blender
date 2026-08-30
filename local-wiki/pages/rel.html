@@ -245,24 +245,76 @@
       UV-animated content at all, consistent with the theme), acave01 (37 - thematically coherent names
       like <code>domagma_taki</code> "lava waterfall" and <code>bridge01</code>/<code>bridge02</code>,
       confirming the mechanism generalizes past acity's city-specific content).</li>
-    <li><strong>Checked whether the same rename could apply to animated trees - not yet, different
-      structure</strong>: <code>AnimatedMeshTree.unk1</code> is confirmed to be a real pointer too (same
-      relocation-table check as the static case), and is very likely the GameCube-derived <code>a_ofs</code>
-      field from the original animated_mesh_trees investigation (same struct position, right after the
-      mesh pointer) - but it does <strong>not</strong> lead to a name pair. Dereferenced directly (as an
-      absolute offset, not payload-relative like the static case), it lands on a differently-shaped
-      record: <code>(nearby_ptr, small_count, type_flag=0x2000B or 0x30007, ...)</code> - e.g. counts
-      like 120, 300, 1000, 2400 seen on real acity data. Plausibly the "separately real 3D coordinates"
-      half of the old mixed-content finding (movement/keyframe data?) rather than another name table -
-      not decoded yet, a distinct open thread from the static-tree naming work above.
-      Dereferenced <code>nearby_ptr</code> one level further: not a flat float array (checked directly,
-      first 64 bytes are all zero/NaN when read as floats) - it contains yet more embedded pointers,
-      including one pointing back at <code>nearby_ptr</code>'s own address. `type_flag` seen so far:
-      <code>0x20003</code> (acity chunk 20's trees) and <code>0x30007</code> (chunk 40/41's) - two
-      distinct values, plausibly two different sub-kinds of this record. Genuinely deeper/different
-      structure than the static-tree case - paused here rather than continuing to guess blind; a fresh
-      dedicated pass (probably starting from the GC `a_ofs` cross-reference again, now with a concrete
-      "nested pointers, not flat data" shape to test against) is the natural way back in.</li>
+    <li><strong>Animated trees get the same name-based rename too, now cracked and wired in</strong>
+      (2026-08-30) - <code>AnimatedMeshTree.unk1</code> is confirmed to be a real pointer, likely the
+      GameCube-derived <code>a_ofs</code> field, but dereferenced as an <strong>absolute</strong> file
+      offset (not payload-relative like the static case). <code>unk1 - 16</code> is an 8xU32 header:
+      <code>[0]=0, [1]=?, [2]=0, [3]=small int, [4]=header's own offset (self-reference), [5]=count,
+      [6]=type_flag, [7]=start of embedded name text or 0]</code>. Word <code>[1]</code> looked like a
+      "previous node" pointer at first (its offset from the header matched <code>word[3] * 16</code>
+      exactly on the first sample checked) but following it one hop further lands in unrelated/garbage
+      data on every map tried - that hypothesis didn't survive a second sample, it doesn't form a real
+      chain. <code>word[5]</code>/<code>word[6]</code> ("count"/"type_flag") remain unexplained - no
+      correlation found yet between their values and whether a chunk's header carries names.<br><br>
+      The real payoff: for <strong>some</strong> chunks (not all), the header at offset <code>+28</code>
+      is immediately followed by a chain of NUL-terminated names drawn from the exact same shared
+      per-map name table as the static UV case - e.g. acity chunk 40 gives
+      <code>("g032_Box03a", "g032_hand")</code>, and chunk 40 is very plausibly the Guild door mechanism
+      itself (matches the <code>h32_hnt_door04</code> catalog entry found in the same table - the
+      original "which mesh is the door" question this whole investigation started from). Coverage is
+      real but concentrated, checked <strong>per individual tree</strong> (an earlier pass that only
+      sampled one tree per chunk undercounted this - a chunk can genuinely mix named and unnamed trees,
+      see acity chunk 41 below): acity has 12 named trees out of 33 total, all in the door area (chunk
+      40: 4/4 named; chunk 41: 8/11 named - trees at index 0, 1, and 10 are unnamed, the 8 in between
+      share chunk 40's exact door record; chunks 10/20/30 are 0/18 named). acave01 has 5/35 named
+      (chunk 60, all of it). aforest01 is the outlier - a single shared record
+      (<code>"ts_256k_koke02"</code>, moss) applies to literally every one of its 36 animated trees.
+      Wired into <code>n_rel.py</code> the same way as the static case: first discovered name appended
+      to the object's name, full chain stashed as <code>obj["pso_anim_part_names"]</code>. Verified on
+      the same 3 real maps, no regressions (acity 33/33 objects, acave01 35/35, aforest01 all objects
+      present and correctly named/unnamed).<br><br>
+      One side discovery from debugging this: names here can be <strong>mixed-case</strong> (e.g.
+      "Box03a", likely an original 3D-authoring-tool object name) - the file-wide 245-name catalog scan
+      used a lowercase-only regex and so silently missed it. Re-ran that scan case-insensitively on
+      acity: only <strong>1</strong> real miss out of 250 total candidate strings (everything else the
+      looser regex additionally matched was binary-data noise) - the 245-name table is still
+      essentially complete and reliable, this was a narrow, now-understood gap rather than a systemic
+      problem.</li>
+    <li><strong>Export attempted for the named subset, CONFIRMED to crash the game client (2026-08-30)
+      - reverted, not shipped.</strong> Previously <code>animated_mesh_trees</code> was import-only,
+      real doors/moving props never survived a re-export. A scoped export path was built: only
+      animated trees whose <code>unk1</code> block has a real, fully-bounded name chain (see above)
+      would be exported - the whole referenced block (32-byte header + the names' own bytes, a length
+      that's exactly computable in this case) captured byte-for-byte at import into
+      <code>obj["pso_anim_unk1_raw_hex"]</code>, written back out unmodified at its new file location
+      on export. <code>AnimatedMeshTree.unk1</code>'s declared type had to change from a plain
+      <code>U32</code> to a real <code>Ptr32[...]</code> for this to even round-trip correctly - the
+      pointer relocation table only registers <code>Ptr32</code>-typed fields, and the original file
+      always registers this position, so leaving it a plain int would have silently produced a file
+      where this pointer never gets relocated at load time.<br><br>
+      The addon's own tooling verified clean end-to-end (import -> export -> re-parse -> re-import, all
+      3 real maps, no errors, exported names byte-for-byte identical to the originals) - but
+      <strong>the user tested the exported acity file in the actual Ephinea client and it crashed
+      immediately on map load</strong>. Confirmed the cause by re-exporting with every animated object
+      excluded (bulk-unchecked via a short Python-console script) - that file loads fine, isolating the
+      crash specifically to this feature. This is exactly the failure mode already flagged as a risk
+      before shipping (see the wiki's earlier draft of this section, and the still-true
+      <code>HAS_UV_ANIMATION</code>/invalid-<code>unk1</code> crash precedent above) - but the actual
+      root cause turned out broader than what was flagged: header word <code>[4]</code> wasn't the only
+      embedded pointer-shaped field. <strong>Word <code>[0]</code> or <code>[1]</code> (whichever is
+      non-zero - the two seem mutually exclusive across samples) is also a real address-shaped value</strong>
+      pointing near the block itself, not just noise. Since the block was preserved byte-for-byte rather
+      than field-by-field, every embedded pointer inside it - not just <code>[4]</code> - kept its
+      <em>original</em> file's value after the block moved to a new offset, pointing at whatever
+      unrelated content now happens to live there. That's consistent with an immediate crash at map
+      load rather than only when approaching the affected chunk.<br><br>
+      <strong>Reverted</strong>: <code>is_nrel</code>/<code>is_animated_nrel</code> are no longer
+      auto-set at import (back to pure visualization, matching the addon's behavior before this attempt)
+      - <code>is_animated_nrel</code> stays available as a manual-only override for further
+      investigation, its UI label now explicitly says not to use it for real testing. The raw-block
+      capture code is untouched (harmless, no write-side effect on its own) so the data stays available
+      for whoever picks this back up. Real fix needs the embedded pointer(s) actually understood and
+      individually relocated on export, not copied wholesale - not attempted yet.</li>
   </ul>
 
   <h3 class="hypothesis">Open / hypothesis</h3>
