@@ -12,6 +12,7 @@ from bpy.props import (  # pyright: ignore[reportUnknownVariableType]
     BoolProperty, CollectionProperty, EnumProperty, IntProperty, StringProperty)
 from . import gsl
 from .recent_rel_menu import load_recent_rels
+from .dat_import_menu import guess_dat_object_filename
 
 
 # pyright: reportInvalidTypeForm=false, reportUninitializedInstanceVariable=false
@@ -158,6 +159,17 @@ class PsoLoadGslArchive(Operator):  # pyright: ignore[reportIncompatibleMethodOv
             row.byte_offset = entry.byte_offset
             row.length = entry.length
         scene.pso_gsl_entries_index = 0
+
+        # Now that this archive's entries are loaded, the DAT Objects panel (dat_import_menu.py) can
+        # immediately resolve a matching .dat for the last-imported map from inside it - fill its path
+        # field right away instead of making the user visit that panel and click its own Load first.
+        # Same auto-detect-plus-manual-override rule as everywhere else: only ever fills an empty
+        # field, never overwrites a path the user already set.
+        if not cast(str, getattr(scene, "pso_dat_path", "")):
+            guessed_dat = guess_dat_object_filename()
+            if guessed_dat:
+                cast(Any, scene).pso_dat_path = guessed_dat
+
         self.report({"INFO"}, "Loaded {} entries from '{}'.".format(len(entries), os.path.basename(path)))
         return {"FINISHED"}
 
@@ -207,6 +219,32 @@ class PsoExtractGslEntries(Operator):  # pyright: ignore[reportIncompatibleMetho
             written += 1
         self.report({"INFO"}, "Extracted {} file(s) to '{}'.".format(written, out_dir))
         return {"FINISHED"}
+
+
+@final
+class PsoSendGslEntryToDat(Operator):  # pyright: ignore[reportIncompatibleMethodOverride]
+    "Send the checked *o.dat entry above straight to the DAT Objects panel below, no disk extraction needed"
+
+
+    bl_idname = "pso_blender.send_gsl_entry_to_dat"
+    bl_label = "Send to DAT Menu"
+
+    def execute(self, context: Context):  # pyright: ignore[reportIncompatibleMethodOverride]
+        scene = cast(SceneWithGslBrowserSettings, context.scene)
+        # Same `selected` checkboxes the Extract Selected button above reads - but DAT Objects has
+        # exactly one path field, so this only makes sense for a single *o.dat at a time (its sibling
+        # *e.dat, if any, is still found automatically from there - see dat_import_menu.py).
+        candidates = [cast(GslBrowserEntry, e) for e in cast(Any, scene).pso_gsl_entries
+                      if cast(bool, e.selected) and cast(str, e.filename).lower().endswith("o.dat")]
+        if not candidates:
+            self.report({"ERROR"}, "Check one *o.dat entry in the list above first.")
+            return {"CANCELLED"}
+        if len(candidates) > 1:
+            self.report({"ERROR"}, "Check only one *o.dat entry - {} are currently checked.".format(len(candidates)))
+            return {"CANCELLED"}
+
+        cast(Any, scene).pso_dat_path = cast(str, candidates[0].filename)
+        return bpy.ops.pso_blender.load_dat_types()
 
 
 def _filter_and_sort_gsl_entries(items: Any, filter_name: str, bitflag_filter_item: int, type_filter: str) -> "tuple[list[int], list[int]]":
@@ -311,3 +349,4 @@ class PSO_PT_gsl_browser(Panel):  # pyright: ignore[reportIncompatibleMethodOver
         extract_row = layout.row(align=True)
         extract_row.prop(scene, "pso_gsl_extract_dir", text="")
         layout.operator(PsoExtractGslEntries.bl_idname, icon="EXPORT")
+        layout.operator(PsoSendGslEntryToDat.bl_idname, icon="IMPORT")

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "pso_blender"
-version = "0.1.50"
+version = "0.1.56"
 name = "pso_blender"
 tagline = "Fork of jtuu's PSO Blue Burst map/model tools, focused on texture packs"
 maintainer = "BiscuitIsntMyName"
@@ -12,4 +12,4 @@ blender_version_min = "4.2.0"
 license = ["SPDX:MIT"]
 
 [permissions]
-files = "Reads and writes PSO game files (.rel, .xvm, .bml, .xj, .njm, .tam, .gsl) chosen via file browser dialogs, for import/export"
+files = "Reads and writes PSO game files (.rel, .xvm, .bml, .xj, .njm, .tam, .gsl, .dat) chosen via file browser dialogs, for import/export"

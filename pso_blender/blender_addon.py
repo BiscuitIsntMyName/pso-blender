@@ -45,10 +45,20 @@ from .gsl_browser_menu import (
     GslBrowserEntry,
     PsoLoadGslArchive,
     PsoExtractGslEntries,
+    PsoSendGslEntryToDat,
     PSO_UL_gsl_entries,
     PSO_PT_gsl_browser,
     register_scene_properties as register_gsl_browser_scene_properties,
     unregister_scene_properties as unregister_gsl_browser_scene_properties)
+from .dat_import_menu import (
+    DatTypeEntry,
+    PsoLoadDatTypes,
+    PsoImportDatMarkers,
+    PsoDatTypeInfo,
+    PSO_UL_dat_type_entries,
+    PSO_PT_dat_objects,
+    register_scene_properties as register_dat_objects_scene_properties,
+    unregister_scene_properties as unregister_dat_objects_scene_properties)
 
 
 # @persistent causes an error when this file is executed with fake-bpy-module (unit tests)
@@ -151,8 +161,15 @@ classes = [
     GslBrowserEntry,
     PsoLoadGslArchive,
     PsoExtractGslEntries,
+    PsoSendGslEntryToDat,
     PSO_UL_gsl_entries,
     PSO_PT_gsl_browser,
+    DatTypeEntry,
+    PsoLoadDatTypes,
+    PsoImportDatMarkers,
+    PsoDatTypeInfo,
+    PSO_UL_dat_type_entries,
+    PSO_PT_dat_objects,
     PSO_MT_import,
     PSO_MT_export
 ]
@@ -181,6 +198,7 @@ def register():
     register_bake_scene_properties()
     register_relief_displace_scene_properties()
     register_gsl_browser_scene_properties()
+    register_dat_objects_scene_properties()
     # Add hooks
     load_post.append(convert_legacy_properties)
 
@@ -200,4 +218,5 @@ def unregister():
     unregister_bake_scene_properties()
     unregister_relief_displace_scene_properties()
     unregister_gsl_browser_scene_properties()
+    unregister_dat_objects_scene_properties()
     load_post.remove(convert_legacy_properties)

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>.xj - pso-blender local wiki</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<header><a href="../index.html">pso-blender local wiki</a> <span class="crumbs">/ xj</span></header>
+
+<main>
+  <h1>.xj <span class="status done">documented, implemented (import + export)</span></h1>
+  <div class="subtitle">The actual mesh/material format a render <a href="rel.html">n.rel</a>'s
+    <code>MeshTree</code> points into - vertex buffers, index buffers, and render-state opcodes
+    (blend mode, texture addressing, and critically <strong>which texture</strong>). Also used
+    standalone (paired with its own <code>.xvm</code>) for NPCs/objects/items, as an alternative
+    container to <a href="bml.html">.bml</a>.</div>
+
+  <h3 class="confirmed">Confirmed</h3>
+  <ul>
+    <li><strong>Container level: literally an <code>NJTL</code> + <code>NJCM</code> (+ <code>POF0</code>)
+      <a href="iff.html">IFF chunk</a> stream</strong> - confirmed directly in this addon's own
+      <code>xj.py</code> (<code>IffChunk("NJTL")</code>, <code>IffChunk("NJCM")</code>) and independently
+      in <code>pso_ultimate_importer</code>'s actor importer, which parses the same three chunk tags for
+      <code>.xj</code>. So at the container/chunk-tag level, <code>.xj</code> and
+      <a href="nj.html">.nj</a>/NJCM really do share the same tagging scheme - the two are not as
+      unrelated as the file extensions suggest. See the open discrepancy below for where they actually
+      diverge.</li>
+    <li>This addon's <code>XjMesh</code>/<code>VertexBuffer</code>/<code>IndexBuffer</code> is a
+      vertex-buffer-based mesh encoding (explicit vertex formats, index buffers, per-material
+      <code>RenderStateArgs</code>) - used specifically for map render geometry and standalone
+      object/NPC/item meshes. This addon treats it as structurally distinct from the classic
+      triangle-strip-based NJ/NJCM mesh encoding used <em>inside</em> a <code>.bml</code>'s per-item
+      models - same chunk tag, different payload shape (see below).</li>
+    <li>7 vertex formats (<code>VertexFormat1</code>-<code>7</code>, <code>xj.py</code>), built by
+      composable inheritance of <code>VertexWithPos</code>/<code>VertexWithUv</code>/
+      <code>VertexWithNormal</code>/<code>VertexWithColor</code> - which fields a given mesh's vertices
+      carry (position always, plus any combination of UV/normal/vertex-color) determines which format
+      number it's written as.</li>
+    <li><strong><code>TEXTURE_ID</code> render state is a raw array index</strong> into the paired
+      <code>.xvm</code>'s texture list, confirmed via this addon's own read/write pipeline
+      (<code>xj_xvm.xvrs[tex_id]</code>) - not a lookup by a stable ID. This is why REL export has to be
+      careful to preserve original array *positions*, not just original texture *content* - see
+      <a href="xvm.html">.xvm</a> for the full story (this was the source of a real correctness bug this
+      addon had to work around).</li>
+    <li><code>RenderStateArgs</code>/<code>RenderStateType</code> (<code>xj.py</code>) carry the
+      per-material state a real map/object actually uses - blend mode, texture addressing mode, and the
+      texture ID above.</li>
+  </ul>
+
+  <h3 class="hypothesis">Open discrepancy - cross-reference: pso_ultimate_importer</h3>
+  <ul>
+    <li>Their <code>NinjaXJImporter.readMesh</code>
+      (<code>_archives/pso_ultimate_importer-main/__init__.py:1654</code>) treats the <code>NJCM</code>
+      chunk's mesh payload as the <strong>classic triangle-strip encoding</strong>: a
+      <code>vertex_info_list</code> (per-list <code>vtype</code> flags for uv/normal/color) plus two
+      triangle-strip lists (<code>triangle_strip_list_a</code>/<code>_b</code>) - the same shape their
+      shared <code>NinjaChunkMixin</code> uses for classic DC/GC <a href="nj.html">NJ</a> chunk data, and
+      notably <strong>with no per-material render-state block</strong> (blend mode, texture addressing) -
+      unlike this addon's <code>RenderStateArgs</code>. That's a real structural mismatch with this
+      addon's own vertex-buffer/index-buffer/render-state <code>XjMesh</code> implementation, not just a
+      naming difference.</li>
+    <li>Their <code>_MODEL_EXTS = {'.nj', '.gj', '.xj'}</code> groups <code>.xj</code> alongside DC's
+      <code>.nj</code> and GC's <code>.gj</code> as "the same role, one model per file, one extension per
+      platform" - consistent with how this addon uses <code>.xj</code>, and a useful confirmation of its
+      role even where the internal mesh encoding disagrees.</li>
+    <li>A dedicated pioneer2.net (Ephinea forum) thread, "Xj Conversion Notes" (7 pages, last post
+      2016, author appears to have abandoned it before reaching a conclusion) leans toward the same
+      classic-NJCM/triangle-strip reading - but its detail is about NJCM in general, it's unclear the
+      thread ever specifically nailed down that this is what BB's <code>.xj</code> uses (as opposed to
+      other platforms' model formats), and no render-state/blend-mode/texture-addressing structure was
+      found described anywhere in it. Low-confidence, doesn't really move the needle either way.</li>
+    <li><strong>Not resolved</strong>. This addon's own <code>.xj</code> reader/writer is shipped and
+      exercised against real Ephinea (PC/Blue Burst) files - the stronger signal here - while
+      pso_ultimate_importer's model-parsing code is explicitly scoped to DC/GC in several other places
+      (see <a href="bml.html">.bml</a>'s cross-reference note) and may simply not have a correct BB/PC
+      vertex-buffer path. Neither newserv's docs, the psodevwiki mirror (no <code>xj</code> page exists
+      there at all), nor the pioneer2.net thread above settle it. Worth a deliberate side-by-side byte
+      check on one real <code>.xj</code> file someday rather than assuming either side is right from
+      this alone.</li>
+  </ul>
+
+  <h3 class="source-note" style="font-style:normal; margin-top:28px;">Related settings</h3>
+  <ul>
+    <li>"XJ Settings" (Material Properties panel, <code>xj_material_properties_menu.py</code>) is where
+      this addon exposes the per-material knobs that end up encoded here and in the paired
+      <code>.xvm</code>: blend mode, per-axis texture addressing, Generate Mipmaps, Alpha Compression,
+      Force Uncompressed, and the source <code>.xvm</code> path used by standalone Export XVM.</li>
+  </ul>
+
+  <div class="source-note">Code: <code>pso_blender/xj.py</code>. UI:
+    <code>xj_import_menu.py</code>, <code>xj_export_menu.py</code>,
+    <code>xj_material_properties_menu.py</code>.</div>
+</main>
+
+<footer><a href="../index.html">&laquo; back to index</a> <span class="source-note" style="margin:0;">- last updated 2026-08-30</span></footer>
+
+</body>
+</html>

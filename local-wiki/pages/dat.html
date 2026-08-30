@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>.dat - pso-blender local wiki</title>
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+
+<header><a href="../index.html">pso-blender local wiki</a> <span class="crumbs">/ dat</span></header>
+
+<main>
+  <h1>.dat <span class="status done">field layout + door mechanism confirmed via newserv, cross-checked on real data</span></h1>
+  <div class="subtitle">Per-map, per-area placement data, found inside <a href="gsl.html">.gsl</a>. Comes
+    in two flavors sharing the naming pattern <code>&lt;map&gt;_&lt;area&gt;e.dat</code> (enemy/NPC) and
+    <code>&lt;map&gt;_&lt;area&gt;o.dat</code> (object placement - doors, props, switches...).
+    Investigated 2026-08-30 on forest01, pulled straight out of <code>Data.gsl</code> via
+    <code>gsl.py</code> (no Blender needed for this kind of analysis).</div>
+
+  <h3 class="confirmed">Confirmed - two independent methods agree</h3>
+  <ul>
+    <li>Record size found first by our own exact file-size divisibility + repeating-header check (not
+      assumed from any doc): <strong>72 bytes/record for <code>e.dat</code></strong>,
+      <strong>68 bytes/record for <code>o.dat</code></strong>. Example (forest01, area 00):
+      <code>_00e.dat</code> = 4824 bytes / 72 = 67 enemy records, <code>_00o.dat</code> = 7412 bytes /
+      68 = 109 object records.</li>
+    <li><strong>Independently confirmed</strong> by <a href="https://github.com/fuzziqersoftware/newserv">newserv</a>
+      (an actively maintained open-source PSO server reimplementation with real, working parsing code -
+      not a forum recollection): its <code>ObjectSetEntry</code> struct is exactly <code>0x44</code> =
+      68 bytes, its <code>EnemySetEntry</code> struct is exactly <code>0x48</code> = 72 bytes. Two
+      unrelated methods (byte-count arithmetic on our own real files vs. an independent codebase's
+      struct definitions) landing on the same sizes is a solid confirmation, not a coincidence.
+      Source: <a href="https://github.com/fuzziqersoftware/newserv/blob/master/src/Map.hh">src/Map.hh</a>,
+      <a href="https://github.com/fuzziqersoftware/newserv/blob/master/src/Map.cc">src/Map.cc</a>.</li>
+  </ul>
+
+  <h3 class="confirmed">Confirmed - field layout, verified directly against newserv's real source
+    (cloned locally to <code>_archives/newserv</code>, not just a summary)</h3>
+  <p style="font-size:14px; color:#6a675e;">Position is <strong>room-relative</strong>, not world
+    space - per newserv, must be rotated/translated by the owning room's angle/offset (which live in
+    the matching <a href="rel.html">.rel</a>).</p>
+
+  <table>
+    <tr><th>Offset</th><th><code>ObjectSetEntry</code> (68 bytes)</th></tr>
+    <tr><td>0x00</td><td>u16 <code>base_type</code> - the object type ID (door types, props, switches - see table below)</td></tr>
+    <tr><td>0x02</td><td>u16 <code>set_flags</code> (runtime-only, unused in the file)</td></tr>
+    <tr><td>0x04</td><td>u16 <code>index</code> (runtime-only)</td></tr>
+    <tr><td>0x06</td><td>u16 <code>floor</code></td></tr>
+    <tr><td>0x08</td><td>u16 <code>entity_id</code> (runtime-only, = index + 0x4000)</td></tr>
+    <tr><td>0x0A</td><td>u16 <code>group</code></td></tr>
+    <tr><td>0x0C</td><td>u16 <code>room</code></td></tr>
+    <tr><td>0x0E</td><td>u16 <code>unknown_a3</code></td></tr>
+    <tr><td>0x10</td><td>3x float32 <code>pos</code> (X/Y/Z, room-relative)</td></tr>
+    <tr><td>0x1C</td><td>3x u16 <code>angle</code> (0 = none, 0xFFFF &asymp; full turn)</td></tr>
+    <tr><td>0x28</td><td>float32 <code>param1</code></td></tr>
+    <tr><td>0x2C</td><td>float32 <code>param2</code></td></tr>
+    <tr><td>0x30</td><td>float32 <code>param3</code></td></tr>
+    <tr><td>0x34</td><td>i32 <code>param4</code> - for doors, the switch-flag number (see below)</td></tr>
+    <tr><td>0x38</td><td>i32 <code>param5</code></td></tr>
+    <tr><td>0x3C</td><td>i32 <code>param6</code> - for the Forest door, 1 enables the unlock cutscene</td></tr>
+    <tr><td>0x40</td><td>u32 unused (runtime-only pointer)</td></tr>
+  </table>
+  <p style="font-size:13px; color:#6a675e;"><code>EnemySetEntry</code> (72 bytes) is the same shape
+    with an extra <code>num_children</code>/<code>wave_number</code>/<code>wave_number2</code> up
+    front, and 5 float params + 2 int16 params instead of the 3 float + 3 int32 params above.</p>
+
+  <h3 class="confirmed">Confirmed - door/switch object type IDs (this directly answers the original
+    "which type ID is a door" question)</h3>
+  <p style="font-size:14px; color:#6a675e;">There is no single "door" type - each area/theme has its
+    own door class(es), all using a <code>param4 = switch_flag_number</code> convention:</p>
+  <table>
+    <tr><th>Type ID</th><th>Class</th></tr>
+    <tr><td>0x0056</td><td><code>TODoorLabo</code> - Episode 2 Lab door</td></tr>
+    <tr><td>0x0080</td><td><code>TObjDoor</code> - Forest door</td></tr>
+    <tr><td>0x0081</td><td><code>TObjDoorKey</code> - key-locked door/switch (Forest/Cave/VR)</td></tr>
+    <tr><td>0x00C1 / 0x00C2</td><td><code>TODoorCave01</code>/<code>TODoorCave02</code> - Caves doors (multi-switch / standard)</td></tr>
+    <tr><td>0x0100 / 0x0102</td><td><code>TODoorMachine01</code>/<code>TODoorMachine02</code> - Mines doors (0x0102 reused for the Ep4 desert door)</td></tr>
+    <tr><td>0x0130</td><td><code>TODoorVoShip</code> - post-Vol Opt ruins door, reads quest flags directly, not switch flags</td></tr>
+    <tr><td>0x0144-0x014B</td><td><code>TODoorAncient01</code>-<code>09</code> - Ruins doors</td></tr>
+    <tr><td>0x01A0 / 0x01AB / 0x01C0</td><td>Temple/Spaceship doors (<code>TODoorVS2Door01</code>/<code>TODoorFourLightRuins</code>/<code>TODoorFourLightSpace</code>)</td></tr>
+    <tr><td>0x0202 / 0x0204</td><td><code>TObjDoorJung</code>/<code>TODoorJungleMain</code> - CCA doors (0x0204's switch sets one of 3 quest flags it checks directly)</td></tr>
+    <tr><td>0x0221 / 0x0222</td><td>Seabed multiplayer doors (<code>TODoorFourLightSeabed</code>/<code>...SeabedU</code>)</td></tr>
+    <tr><td>0x0046-0x0049, 0x0054</td><td>City doors (shop/guild/Ragol warp/med center/lobby-blocker) - no params</td></tr>
+    <tr><td>0x0090</td><td><code>TOKeyGenericSw</code> - generic switch for non-door triggers (lights, poison rooms, bridges)</td></tr>
+  </table>
+  <p style="font-size:13px; color:#6a675e;">Correction to our own earlier guess: type <code>0x88</code>
+    (the dominant type in forest01 area 00, 49 of 109 records) is <strong>not</strong> a decorative
+    prop as first assumed - per newserv it's <code>TObjContainerBase2</code>, an item/drop box.</p>
+  <p style="font-size:13px; color:#6a675e;"><strong>Important caveat, seen directly in the real
+    table</strong>: <code>base_type</code> IDs are <em>not</em> globally unique - the same numeric ID
+    means a completely different object depending on area (and sometimes game version). E.g.
+    <code>0x00C1</code> is <code>TODoorCave01</code> in the Caves but the De Rol Le boss controller
+    (<code>TBoss2DeRolLe</code>) on that boss floor; <code>0x0100</code> is <code>TODoorMachine01</code>
+    in the Mines but an NPC (<code>__MOMOKA__</code>) in the City. Any future parser needs the area
+    (and ideally game version) alongside the type ID to look up the right meaning - a lookup table
+    keyed on type ID alone would be wrong in general, even though it's usually right within one theme.</p>
+
+  <h3 class="confirmed">Confirmed - other common non-door object type IDs</h3>
+  <p style="font-size:14px; color:#6a675e;">Found while testing on real acity data (2026-08-30): a
+    user importing acity's <code>o.dat</code> objects noticed many of them looked like player spawn
+    points - confirmed directly in newserv's source, not a guess:</p>
+  <table>
+    <tr><th>Type ID</th><th>Class</th></tr>
+    <tr><td>0x0000</td><td><code>TObjPlayerSet</code> - defines where a player starts when entering a
+      floor. <code>param1</code> = client ID (0-3), <code>param4</code> = source type (0 = arriving
+      from a lower floor, 1 = from a higher floor).</td></tr>
+    <tr><td>0x0001</td><td><code>TObjParticle</code> - particle effect, not constructed in split-screen.</td></tr>
+    <tr><td>0x0002</td><td><code>TObjAreaWarpForest</code> - triangular cross-floor warp (<code>param4</code> = destination floor).</td></tr>
+    <tr><td>0x0003</td><td><code>TObjMapWarpForest</code> - triangular intra-floor warp (<code>param1-3</code> = destination coords, <code>param4</code> = destination angle).</td></tr>
+    <tr><td>0x0008</td><td><code>TObjEvtCollision</code> - event collision object, triggers a wave event when a player is nearby (<code>param1</code> = radius, <code>param4</code> = event ID).</td></tr>
+    <tr><td>0x000E</td><td><code>TObjRoomId</code> - sets a player's room ID when nearby (used for split-screen/room-scoping logic).</td></tr>
+    <tr><td>0x0082</td><td><code>TObjLazerFenceNorm</code> - laser fence, <code>param4</code> = switch flag, <code>param6</code> = model (short/long).</td></tr>
+    <tr><td>0x0084</td><td><code>TLazerFenceSw</code> - laser fence switch, <code>param4</code> = switch flag, <code>param6</code> = color.</td></tr>
+    <tr><td>0x0087</td><td><code>TMotorcycle</code> - small vehicle prop.</td></tr>
+    <tr><td>0x0088</td><td><code>TObjContainerBase2</code> - item/drop box (the type earlier mistaken for a decorative prop, see correction above).</td></tr>
+    <tr><td>0x008D</td><td><code>TOCapsuleAncient01</code> - capsule/container, <code>param6</code> = quest label called when activated.</td></tr>
+    <tr><td>0x008E</td><td><code>TOBarrierEnergy01</code> - energy barrier, <code>param4</code> = switch flag + activation mode.</td></tr>
+    <tr><td>0x0092</td><td><code>TObjContainerBase</code> - large box (specialized drops), same params as 0x0088.</td></tr>
+  </table>
+  <p style="font-size:13px; color:#6a675e;">All confirmed directly in
+    <code>_archives/newserv/src/Map.cc</code>'s <code>dat_object_definitions</code> table - this is the
+    same list <code>pso_blender/dat.py</code>'s <code>KNOWN_OBJECT_TYPE_NAMES</code> ships with.</p>
+
+  <h3 class="confirmed">Confirmed - filename suffix convention (game mode)</h3>
+  <p style="font-size:14px;">newserv's <code>SetDataTable::map_filename_for_variation</code> builds the
+    filename as <code>&lt;area basename&gt;&lt;o or e&gt;&lt;game-mode suffix&gt;.dat</code> (or
+    <code>.evt</code> for events, no <code>o</code>/<code>e</code> letter). The game-mode suffix -
+    <strong>applied only to the floor-0 file</strong> - is: nothing for Normal, <code>_s</code> for
+    Solo, <code>_c1</code> for Challenge, <code>_d</code> for <strong>Battle</strong> (PSO's PvP mode).
+    This explains the <code>d</code>-suffixed files seen alongside forest01's area files
+    (<code>map_forest01d.dat</code> et al.) - they're the Battle-mode variant.</p>
+  <p style="font-size:13px; color:#6a675e;"><strong>Not covered by this table, still unexplained</strong>:
+    the <code>_off</code>/<code>_offe</code> suffix this addon found on its own (see below), and the
+    <code>_gjo</code>/<code>ad</code> suffixes seen in forest01's file listing (e.g.
+    <code>map_forest01_gjo.dat</code>, <code>map_forest01ad.dat</code>) - newserv's filename-generation
+    code has no matching pattern for any of these (checked directly - no <code>"_off"</code> string
+    anywhere in its source, no BB-specific override of <code>map_filename_for_variation</code>). Still
+    open.</p>
+  <p style="font-size:13px; color:#6a675e;"><strong>User's hypothesis (2026-08-30), plausible but not
+    confirmed</strong>: <code>_off</code> = "offline" - Blue Burst has a "one person" mode similar to
+    an offline/solo session, and if only one player is in the game the placed elements (enemy count
+    especially) probably change accordingly. Fits the observed data well (the <code>_off</code> enemy
+    set is a strict subset of the normal one, exactly the shape you'd expect from "fewer enemies for
+    fewer players"). Doesn't map onto newserv's own <code>_s</code> (Solo) suffix by name, so either
+    Ephinea's real client files use a different naming convention than what newserv's internal
+    filename-generation logic assumes, or this is a distinct concept from newserv's Solo mode -
+    unresolved either way.</p>
+
+  <h3 class="confirmed">Confirmed - the <code>_off</code> mechanism</h3>
+  <ul>
+    <li><strong>Disambiguating result, our own data</strong>: the <code>_off</code> enemy file is a
+      byte-identical <em>ordered subsequence</em> of the normal file (same 72-byte records, verbatim,
+      just fewer of them - 32 of 67 for area 00) - not an edited copy, purely a subset. Combined with
+      the <a href="evt.html">.evt</a> finding that the two variants' event data is 100% byte-identical,
+      this means "off" mode is purely "spawn fewer enemies", not a change to any door/object logic.</li>
+    <li>Objects (<code>o.dat</code>) never have an <code>_off</code> variant at all, consistent with
+      that reading.</li>
+  </ul>
+
+  <pre>map_forest01_00e.dat, first record (72 bytes):
+43 00 00 00 00 00 00 00 01 00 ff ff 02 00 03 00
+03 00 00 00 78 4d 00 c3 1b 54 86 41 00 fe ae c1
+00 00 00 00 00 c0 ff ff 00 00 00 00 02 00 80 3f
+02 00 80 3f 00 00 00 00 00 00 00 00 00 00 00 00
+00 00 00 00 90 61 fc 8c</pre>
+
+  <div class="source-note">Cross-reference: checked <code>pso_ultimate_importer</code> - no
+    <code>.dat</code> handling of any kind (that addon only imports models/textures/stages, not
+    enemy/object placement data). Nothing to borrow from there. <strong>newserv</strong>
+    (github.com/fuzziqersoftware/newserv, cloned locally to <code>_archives/newserv</code> for direct
+    verification, MIT-licensed - see <a href="credits.html">credits</a>), by contrast, has full working
+    parsing code and answered almost everything above - <code>src/Map.hh</code> for the struct layout,
+    <code>src/Map.cc</code>'s <code>dat_object_definitions</code>/<code>dat_enemy_definitions</code> for
+    the full per-type-ID parameter documentation (thousands of lines, only doors excerpted above).</div>
+
+  <div class="source-note">No parser exists in this addon yet - this is pure investigation (throwaway
+    scripts against <code>gsl.py</code>'s output, plus reading newserv's source). See
+    <code>pso-blender-external-notes/next_subjects_to_work.md</code> for the running log of what's been
+    checked each session.</div>
+</main>
+
+<footer><a href="../index.html">&laquo; back to index</a> <span class="source-note" style="margin:0;">- last updated 2026-08-30</span></footer>
+
+</body>
+</html>
