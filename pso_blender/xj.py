@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import ClassVar, TypeAlias, TypeGuard, cast, final
+from typing import Any, ClassVar, TypeAlias, TypeGuard, cast, final
 from warnings import warn
 import bpy, os, bmesh, math, hashlib
 from dataclasses import dataclass, field
@@ -936,8 +936,12 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: "int | str", img
     group_output.location = (300, 0)
 
     _ = group.links.new(group_input.outputs["Vector"], tex_image_node.inputs["Vector"])
-    _ = group.links.new(tex_image_node.outputs["Color"], group_output.inputs["Color"])
-    _ = group.links.new(tex_image_node.outputs["Alpha"], group_output.inputs["Alpha"])
+    # Also creates the Roughness/Metallic/Normal/Displacement output sockets (with safe neutral
+    # defaults) and wires the default straight-through Color/Alpha - the exact same "no relief
+    # data" state a "Send to ImgGroup" of a plain image already produces via this same function, so
+    # every group is in one consistent, fully-populated state from the moment it's created rather
+    # than a special-cased subset of it that make_material would otherwise try to link against.
+    _wire_relief_composite(group, tex_image_node, None, None)
     return group
 
 
@@ -946,6 +950,42 @@ def get_or_create_texture_node_group(xvm_filename: str, tex_id: "int | str", img
 # group's Color output is still directly linked to PSO_Diffuse, or fed through nodes like these).
 _RELIEF_IMAGE_NODE_NAMES = ("PSO_Normal", "PSO_Metal", "PSO_Roughness", "PSO_Height")
 _RELIEF_NODE_PREFIX = "PSO_Relief_"
+
+
+def _ensure_group_output_socket(
+    tree: bpy.types.ShaderNodeTree, group_output_node: bpy.types.Node, name: str, socket_type: str,
+    default_value: object = None,
+) -> None:
+    """Adds an OUTPUT socket to a node group's interface if not already present - idempotent,
+    since this now runs every time a group is created or re-wired (get_or_create_texture_node_group
+    / _wire_relief_composite), and group.interface.new_socket() would otherwise happily create a
+    second socket with the same name every time instead of erroring or reusing it. Also lets a
+    group saved by an older addon version (before Roughness/Metallic/Normal/Displacement outputs
+    existed) pick them up the next time anything re-wires it, with no separate migration step.
+
+    default_value matters because these sockets get linked to a Principled BSDF's Roughness/
+    Metallic/Normal inputs unconditionally (see make_material) even when the underlying image is
+    absent and nothing inside the group feeds the socket internally - Blender falls back to
+    whatever default value the *unlinked input socket on the actual GroupOutput node* holds in that
+    case. A bare 0.0 default would make an ordinary plain-diffuse PSO texture (the common case, no
+    relief data at all) look like a 0-roughness mirror; a Normal default of (0, 0, 0) is a
+    degenerate/invalid direction. So callers pass a physically-neutral default explicitly instead
+    of relying on Blender's generic per-type zero.
+
+    Confirmed live 2026-09-02: setting default_value on the NodeTreeInterfaceSocket returned by
+    interface.new_socket() does NOT propagate to a GroupOutput node instance that already existed
+    at the moment the socket was added (its own mirrored input socket keeps the generic type-zero
+    default it was created with) - only setting default_value directly on
+    group_output_node.inputs[name] actually affects what gets output when nothing is linked. Set
+    unconditionally on every call (not just when the socket is newly created) so it stays correct
+    regardless of that sync quirk."""
+    for item in tree.interface.items_tree:
+        if item.item_type == "SOCKET" and item.in_out == "OUTPUT" and item.name == name:
+            break
+    else:
+        _ = tree.interface.new_socket(name=name, in_out="OUTPUT", socket_type=socket_type)
+    if default_value is not None:
+        cast(Any, group_output_node.inputs[name]).default_value = default_value
 
 
 def _wire_relief_composite(
@@ -961,29 +1001,41 @@ def _wire_relief_composite(
     color - live, using only Math/Mix/Map Range nodes (no BSDF, no light), so it's visible in the
     viewport under any shading mode without depending on scene lighting, and so export (see
     xvm.bake_texture_group) can reproduce exactly the same result by baking this group's actual
-    output instead of needing a separately-maintained formula.
+    Color/Alpha output instead of needing a separately-maintained formula.
 
-    roughness_image, if present, modulates the *normal* relief factor only (not metal's, a
-    different physical property): rough/matte areas show the full relief darkening, smooth areas
-    are pulled back toward neutral (no darkening) - a fake "occlusion" cue makes little sense on a
-    mirror-smooth surface. Has no effect if normal_image is None (nothing to modulate).
+    Also exposes Roughness/Metallic/Normal/Displacement as independent raw output sockets on the
+    group's own interface (Normal pre-decoded via a Normal Map node, ready to plug straight into a
+    Principled BSDF's Normal input) - added 2026-09-02 so make_material's outer material-level
+    shader can wire a real Principled BSDF from these for an accurate viewport preview, without
+    duplicating the image loads (the shared group already holds them). These are independent of
+    each other and of the Color composite below - e.g. a metal-only asset with no normal map still
+    gets a Metallic output. xvm.bake_texture_group only ever reads the group's Color/Alpha outputs
+    by name, so these extra sockets have no effect on export.
+
+    roughness_image, if present, ALSO modulates the *normal* relief factor in the Color composite
+    below (not metal's, a different physical property): rough/matte areas show the full relief
+    darkening, smooth areas are pulled back toward neutral (no darkening) - a fake "occlusion" cue
+    makes little sense on a mirror-smooth surface. That modulation has no effect if normal_image is
+    None, but the independent Roughness output above is still wired regardless.
 
     height_image, if present, is a genuine displacement/height map (as opposed to normal_image's
     derived-from-slope approximation) - e.g. Poly Haven materials routinely ship one separately
     from their normal map (see util.find_material_displacement_image). Deliberately NOT wired into
-    the darkening formula below at all - just stored as a "PSO_Height" node in the group tree (same
-    convention as PSO_Normal/PSO_Metal/PSO_Roughness) so relief_displace_menu.py can find and
-    prefer it as a more accurate height source than deriving one from PSO_Normal's blue channel.
-    Independent of normal_image/metal_image - stored even if both of those are None.
+    the Color darkening formula below at all - stored as a "PSO_Height" node (same convention as
+    PSO_Normal/PSO_Metal/PSO_Roughness) so relief_displace_menu.py can find and prefer it as a more
+    accurate height source than deriving one from PSO_Normal's blue channel, and now also exposed
+    raw via the Displacement output socket above. Independent of normal_image/metal_image - stored
+    even if both of those are None.
 
     Always tears down and rebuilds from scratch (removing any node from a previous call, found by
     name) rather than trying to patch existing wiring incrementally - simpler, and avoids leftover
     nodes from an earlier state (e.g. metal removed but normal kept) accidentally staying wired in.
 
-    normal_image=None, metal_image=None restores the group's original default wiring (diffuse
-    node's Color/Alpha linked directly to the group's outputs) - this is also what every "Send to
-    ImgGroup" operator calls when sending a plain image, so a previously-wired composite is
-    correctly torn down rather than left stale.
+    normal_image=None, metal_image=None restores the group's original default Color/Alpha wiring
+    (diffuse node's Color/Alpha linked directly to the group's outputs) - this is also what every
+    "Send to ImgGroup" operator calls when sending a plain image, so a previously-wired composite is
+    correctly torn down rather than left stale. The independent Roughness/Metallic/Normal/
+    Displacement outputs are unaffected by this and still reflect whatever images were passed.
     """
     for name in _RELIEF_IMAGE_NODE_NAMES:
         node = group_tree.nodes.get(name)
@@ -996,6 +1048,15 @@ def _wire_relief_composite(
     group_input = next(n for n in group_tree.nodes if n.type == "GROUP_INPUT")
     group_output = next(n for n in group_tree.nodes if n.type == "GROUP_OUTPUT")
 
+    # Defaults chosen so a plain texture with none of this data (the common case) reads as
+    # physically neutral once linked to a Principled BSDF - see _ensure_group_output_socket.
+    _ensure_group_output_socket(group_tree, group_output, "Roughness", "NodeSocketFloat", default_value=1.0)
+    _ensure_group_output_socket(group_tree, group_output, "Metallic", "NodeSocketFloat", default_value=0.0)
+    _ensure_group_output_socket(group_tree, group_output, "Normal", "NodeSocketVector", default_value=(0.0, 0.0, 1.0))
+    _ensure_group_output_socket(group_tree, group_output, "Displacement", "NodeSocketFloat", default_value=0.0)
+
+    # --- Height / Displacement - independent of everything else below ---
+    height_tex: bpy.types.ShaderNodeTexImage | None = None
     if height_image is not None:
         height_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
         height_tex.name = "PSO_Height"
@@ -1003,8 +1064,87 @@ def _wire_relief_composite(
         height_tex.location = (0, -1200)
         _ = group_tree.links.new(group_input.outputs["Vector"], height_tex.inputs["Vector"])
 
-    # Alpha always passes straight through from the diffuse node - the relief composite only ever
-    # affects color.
+    for link in list(group_output.inputs["Displacement"].links):
+        group_tree.links.remove(link)
+    if height_tex is not None:
+        # Height maps are single-channel/grayscale in practice - Color->Float is an implicit
+        # luminance conversion Blender does automatically on this kind of cross-type link.
+        _ = group_tree.links.new(height_tex.outputs["Color"], group_output.inputs["Displacement"])
+
+    # --- Roughness - built once here (independent raw value), reused below by the Color composite
+    # if a normal map is also present. Used to only be built nested inside "if normal_image is not
+    # None", silently dropping roughness entirely whenever there was no normal map (confirmed
+    # 2026-09-02) - now independent, matching how metal already worked. ---
+    roughness_value_socket: bpy.types.NodeSocket | None = None
+    if roughness_image is not None:
+        roughness_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        roughness_tex.name = "PSO_Roughness"
+        roughness_tex.image = roughness_image
+        roughness_tex.location = (0, -900)
+        _ = group_tree.links.new(group_input.outputs["Vector"], roughness_tex.inputs["Vector"])
+
+        separate_roughness = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+        separate_roughness.name = _RELIEF_NODE_PREFIX + "SeparateRoughness"
+        separate_roughness.location = (250, -900)
+        _ = group_tree.links.new(roughness_tex.outputs["Color"], separate_roughness.inputs["Color"])
+        roughness_value_socket = separate_roughness.outputs["Red"]
+
+    for link in list(group_output.inputs["Roughness"].links):
+        group_tree.links.remove(link)
+    if roughness_value_socket is not None:
+        _ = group_tree.links.new(roughness_value_socket, group_output.inputs["Roughness"])
+
+    # --- Metal - independent raw value, reused below by the Color composite ---
+    metal_value_socket: bpy.types.NodeSocket | None = None
+    if metal_image is not None:
+        metal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        metal_tex.name = "PSO_Metal"
+        metal_tex.image = metal_image
+        metal_tex.location = (0, -600)
+        _ = group_tree.links.new(group_input.outputs["Vector"], metal_tex.inputs["Vector"])
+
+        separate_metal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+        separate_metal.name = _RELIEF_NODE_PREFIX + "SeparateMetal"
+        separate_metal.location = (250, -600)
+        _ = group_tree.links.new(metal_tex.outputs["Color"], separate_metal.inputs["Color"])
+        metal_value_socket = separate_metal.outputs["Red"]
+
+    for link in list(group_output.inputs["Metallic"].links):
+        group_tree.links.remove(link)
+    if metal_value_socket is not None:
+        _ = group_tree.links.new(metal_value_socket, group_output.inputs["Metallic"])
+
+    # --- Normal - raw Blue channel reused below by the Color composite's darkening factor; a
+    # separate Normal Map node (built once, here, shared by every material using this group)
+    # decodes the same texture into a ready-to-use Normal vector for the independent output. ---
+    normal_blue_socket: bpy.types.NodeSocket | None = None
+    normal_decoded_socket: bpy.types.NodeSocket | None = None
+    if normal_image is not None:
+        normal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
+        normal_tex.name = "PSO_Normal"
+        normal_tex.image = normal_image
+        normal_tex.location = (0, -300)
+        _ = group_tree.links.new(group_input.outputs["Vector"], normal_tex.inputs["Vector"])
+
+        separate_normal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
+        separate_normal.name = _RELIEF_NODE_PREFIX + "SeparateNormal"
+        separate_normal.location = (250, -300)
+        _ = group_tree.links.new(normal_tex.outputs["Color"], separate_normal.inputs["Color"])
+        normal_blue_socket = separate_normal.outputs["Blue"]
+
+        normal_map_node = cast(bpy.types.ShaderNodeNormalMap, group_tree.nodes.new(type="ShaderNodeNormalMap"))
+        normal_map_node.name = _RELIEF_NODE_PREFIX + "NormalMap"
+        normal_map_node.location = (250, -150)
+        _ = group_tree.links.new(normal_tex.outputs["Color"], normal_map_node.inputs["Color"])
+        normal_decoded_socket = normal_map_node.outputs["Normal"]
+
+    for link in list(group_output.inputs["Normal"].links):
+        group_tree.links.remove(link)
+    if normal_decoded_socket is not None:
+        _ = group_tree.links.new(normal_decoded_socket, group_output.inputs["Normal"])
+
+    # --- Alpha always passes straight through from the diffuse node - the relief composite only
+    # ever affects color. ---
     for link in list(group_output.inputs["Alpha"].links):
         group_tree.links.remove(link)
     _ = group_tree.links.new(diffuse_node.outputs["Alpha"], group_output.inputs["Alpha"])
@@ -1024,17 +1164,7 @@ def _wire_relief_composite(
     factor_socket: bpy.types.NodeSocket | None = None
 
     if normal_image is not None:
-        normal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
-        normal_tex.name = "PSO_Normal"
-        normal_tex.image = normal_image
-        normal_tex.location = (0, -300)
-        _ = group_tree.links.new(group_input.outputs["Vector"], normal_tex.inputs["Vector"])
-
-        separate_normal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
-        separate_normal.name = _RELIEF_NODE_PREFIX + "SeparateNormal"
-        separate_normal.location = (250, -300)
-        _ = group_tree.links.new(normal_tex.outputs["Color"], separate_normal.inputs["Color"])
-
+        assert normal_blue_socket is not None
         # Normal maps store tangent-space direction with components 0-1 mapping to -1..1 (standard
         # OpenGL convention) - so stored Blue (Z) of 0.5 decodes to 0 (fully tilted away from
         # straight up) and 1.0 decodes to 1 (straight up, untilted). A single clamped Map Range
@@ -1051,21 +1181,11 @@ def _wire_relief_composite(
         remap_normal.inputs[2].default_value = 1.0  # From Max
         remap_normal.inputs[3].default_value = xvm._RELIEF_MIN_DARKEN  # To Min  # pyright: ignore[reportPrivateUsage]
         remap_normal.inputs[4].default_value = 1.0  # To Max
-        _ = group_tree.links.new(separate_normal.outputs["Blue"], remap_normal.inputs[0])  # Value
+        _ = group_tree.links.new(normal_blue_socket, remap_normal.inputs[0])  # Value
         factor_socket = remap_normal.outputs["Result"]
 
         if roughness_image is not None:
-            roughness_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
-            roughness_tex.name = "PSO_Roughness"
-            roughness_tex.image = roughness_image
-            roughness_tex.location = (0, -900)
-            _ = group_tree.links.new(group_input.outputs["Vector"], roughness_tex.inputs["Vector"])
-
-            separate_roughness = group_tree.nodes.new(type="ShaderNodeSeparateColor")
-            separate_roughness.name = _RELIEF_NODE_PREFIX + "SeparateRoughness"
-            separate_roughness.location = (250, -900)
-            _ = group_tree.links.new(roughness_tex.outputs["Color"], separate_roughness.inputs["Color"])
-
+            assert roughness_value_socket is not None
             # lerp(1.0, normal_factor, roughness): at roughness=0 (smooth) the result is 1.0 - no
             # darkening at all; at roughness=1 (matte) it's the normal factor unmodified, same as
             # when there's no roughness map; values in between scale proportionally.
@@ -1073,23 +1193,13 @@ def _wire_relief_composite(
             modulate.name = _RELIEF_NODE_PREFIX + "ModulateByRoughness"
             modulate.location = (750, -300)
             modulate.data_type = "FLOAT"
-            _ = group_tree.links.new(separate_roughness.outputs["Red"], modulate.inputs[0])  # Factor
+            _ = group_tree.links.new(roughness_value_socket, modulate.inputs[0])  # Factor
             modulate.inputs[2].default_value = 1.0  # A - neutral/no-effect
             _ = group_tree.links.new(factor_socket, modulate.inputs[3])  # B - the raw normal factor
             factor_socket = modulate.outputs[0]  # Result
 
     if metal_image is not None:
-        metal_tex = cast(bpy.types.ShaderNodeTexImage, group_tree.nodes.new(type="ShaderNodeTexImage"))
-        metal_tex.name = "PSO_Metal"
-        metal_tex.image = metal_image
-        metal_tex.location = (0, -600)
-        _ = group_tree.links.new(group_input.outputs["Vector"], metal_tex.inputs["Vector"])
-
-        separate_metal = group_tree.nodes.new(type="ShaderNodeSeparateColor")
-        separate_metal.name = _RELIEF_NODE_PREFIX + "SeparateMetal"
-        separate_metal.location = (250, -600)
-        _ = group_tree.links.new(metal_tex.outputs["Color"], separate_metal.inputs["Color"])
-
+        assert metal_value_socket is not None
         # Metal value of 0 (dielectric) leaves diffuse untouched; 1 (fully metal) darkens toward
         # _METAL_MAX_DARKEN, approximating a metal's low diffuse response.
         remap_metal = cast(bpy.types.ShaderNodeMapRange, group_tree.nodes.new(type="ShaderNodeMapRange"))
@@ -1100,7 +1210,7 @@ def _wire_relief_composite(
         remap_metal.inputs[2].default_value = 1.0  # From Max
         remap_metal.inputs[3].default_value = 1.0  # To Min
         remap_metal.inputs[4].default_value = xvm._METAL_MAX_DARKEN  # To Max  # pyright: ignore[reportPrivateUsage]
-        _ = group_tree.links.new(separate_metal.outputs["Red"], remap_metal.inputs[0])  # Value
+        _ = group_tree.links.new(metal_value_socket, remap_metal.inputs[0])  # Value
 
         if factor_socket is not None:
             multiply = group_tree.nodes.new(type="ShaderNodeMath")
@@ -1437,7 +1547,7 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
 
     # Link texture and vcol as inputs with a mix node
     output_node = cast(bpy.types.ShaderNodeOutputMaterial, mat.node_tree.nodes.new(type="ShaderNodeOutputMaterial"))
-    bsdf_node = cast(bpy.types.ShaderNodeBsdfDiffuse, mat.node_tree.nodes.new(type="ShaderNodeBsdfDiffuse"))
+    bsdf_node = cast(bpy.types.ShaderNodeBsdfPrincipled, mat.node_tree.nodes.new(type="ShaderNodeBsdfPrincipled"))
     transparency_node = cast(bpy.types.ShaderNodeBsdfTransparent, mat.node_tree.nodes.new(type="ShaderNodeBsdfTransparent"))
     shader_mix_node = cast(bpy.types.ShaderNodeMixShader, mat.node_tree.nodes.new(type="ShaderNodeMixShader"))
 
@@ -1588,14 +1698,22 @@ def make_material(name: str, material_settings: list[RenderStateArgs], node_id: 
         _ = mat.node_tree.links.new(combine_uv_node.outputs["Vector"], tex_node.inputs["Vector"])
 
     _ = mat.node_tree.links.new(shader_mix_node.outputs[0], output_node.inputs[0])
-    _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs[0])
+    _ = mat.node_tree.links.new(mix_node.outputs[2], bsdf_node.inputs["Base Color"])
     _ = mat.node_tree.links.new(vcol_node.outputs[1], alpha_modulate_node.inputs[0])
     _ = mat.node_tree.links.new(alpha_modulate_node.outputs[0], shader_mix_node.inputs[0])
     if tex_node is None:
         cast(bpy.types.NodeSocketFloat, alpha_modulate_node.inputs[1]).default_value = 1.0
     else:
-        _ = mat.node_tree.links.new(tex_node.outputs[0], mix_node.inputs[6])
-        _ = mat.node_tree.links.new(tex_node.outputs[1], alpha_modulate_node.inputs[1])
+        _ = mat.node_tree.links.new(tex_node.outputs["Color"], mix_node.inputs[6])
+        _ = mat.node_tree.links.new(tex_node.outputs["Alpha"], alpha_modulate_node.inputs[1])
+        # Roughness/Metallic/Normal - see _wire_relief_composite, added 2026-09-02: the shared
+        # ImgGroup already exposes these as independent output sockets (Normal pre-decoded via a
+        # Normal Map node inside the group), so wiring a real Principled BSDF here is just links,
+        # no per-material duplication of the underlying images. Every material referencing this
+        # same group gets its own copy of these 3 links, same as it already does for Color/Alpha.
+        _ = mat.node_tree.links.new(tex_node.outputs["Roughness"], bsdf_node.inputs["Roughness"])
+        _ = mat.node_tree.links.new(tex_node.outputs["Metallic"], bsdf_node.inputs["Metallic"])
+        _ = mat.node_tree.links.new(tex_node.outputs["Normal"], bsdf_node.inputs["Normal"])
     _ = mat.node_tree.links.new(transparency_node.outputs[0], shader_mix_node.inputs[1])
     _ = mat.node_tree.links.new(bsdf_node.outputs[0], shader_mix_node.inputs[2])
     _ = mat.node_tree.links.new(vcol_node.outputs[0], mix_node.inputs[7])

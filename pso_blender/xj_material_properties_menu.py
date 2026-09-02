@@ -1,6 +1,7 @@
 from enum import Enum
-from typing import cast, final
+from typing import Callable, cast, final
 import os
+from warnings import warn
 import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty  # pyright: ignore[reportUnknownVariableType]
 from bpy.types import Context
@@ -315,26 +316,216 @@ def draw_send_to_imggroup_menu_item(self: bpy.types.Menu, context: Context):
         _ = self.layout.operator(XjSendImageToImgGroup.bl_idname, icon="EXPORT")
 
 
+def _resolve_asset_datablock(asset: bpy.types.AssetRepresentation) -> "bpy.types.ID | None":
+    """The real Blender datablock behind an Asset Browser entry - directly if already local to this
+    file, or appended from its source library otherwise (the normal case for an external library
+    like Poly Haven's, where the library file already contains the actual content). Shared by every
+    "Send (Asset) to ImgGroup" operator instead of each re-deriving it separately - returns the raw
+    datablock with no further interpretation (could be an Asset Bridge dummy, a real Image, a real
+    Material - the caller decides what to do with it, see _try_force_download_asset_bridge_dummy for
+    the Asset Bridge dummy case specifically)."""
+    datablock = asset.local_id
+    if datablock is not None:
+        return datablock
+    if not asset.full_library_path:
+        return None
+    with bpy.data.libraries.load(asset.full_library_path, link=False) as (data_from, data_to):
+        if asset.id_type == "IMAGE" and asset.name in data_from.images:
+            data_to.images = [asset.name]
+        elif asset.id_type == "MATERIAL" and asset.name in data_from.materials:
+            data_to.materials = [asset.name]
+    if asset.id_type == "IMAGE":
+        return data_to.images[0] if data_to.images else None
+    elif asset.id_type == "MATERIAL":
+        return data_to.materials[0] if data_to.materials else None
+    return None
+
+
+_AMBIENTCG_ROLE_SUFFIXES = {
+    "diffuse": "Color",
+    "normal": "NormalGL",
+    "metal": "Metalness",
+    "roughness": "Roughness",
+    "displacement": "Displacement",
+}
+
+
+def _load_image_for_role(file_path: object, role: str) -> "bpy.types.Image | None":
+    """Loads an image and sets its colorspace explicitly rather than trusting Blender's own
+    filename-heuristic auto-detection - only "diffuse" is a real color image (sRGB, Blender's
+    normal default); normal/metal/roughness/displacement are all data maps that must be Non-Color,
+    or _wire_relief_composite's darkening-factor math reads gamma-corrected values it shouldn't,
+    visibly discoloring the result (confirmed live 2026-09-01 - a foil material came out muddy
+    brown instead of neutral aluminum with this unset). Matches the explicit is_data handling
+    xj.py's own new_image() already does for images built from a REL/XJ import - this is the same
+    thing for images loaded here from a local file instead."""
+    try:
+        img = bpy.data.images.load(str(file_path), check_existing=True)
+    except RuntimeError:
+        return None
+    img.colorspace_settings.is_data = role != "diffuse"
+    return img
+
+
+def _find_ambientcg_style_images(download_dir: object, file_name: str) -> "dict[str, bpy.types.Image]":
+    """ambientCG's own download bundle names every texture map `<file_name>_<Role>.<ext>` (e.g.
+    "Foil001_1K-JPG_Color.jpg", "Foil001_1K-JPG_NormalGL.jpg") - `file_name` is the same
+    `<name>_<quality>` stem ambientCG uses for its own .tres/.blend files (e.g. "Foil001_1K-JPG").
+    Confirmed live 2026-09-02 against a real download folder that this suffix alone fully
+    disambiguates every role - ambientCG also ships a `.tres` Godot resource file with the same
+    mapping spelled out explicitly, but it turned out to be entirely redundant with this, so this
+    replaces the earlier .tres-parsing approach (simpler, one fewer file format to depend on). Same
+    matching principle as _find_polyhaven_style_images just below, only the suffix position differs
+    (ambientCG: role after the quality; Poly Haven: role before it). Returns {our role name: loaded
+    Image}, missing roles simply absent - never raises, returns {} if the folder doesn't exist."""
+    from pathlib import Path
+    dir_path = cast(Path, download_dir)
+    if not dir_path.is_dir():
+        return {}
+    files_by_stem = {f.stem: f for f in dir_path.iterdir() if f.is_file()}
+    images: dict[str, bpy.types.Image] = {}
+    for our_key, suffix in _AMBIENTCG_ROLE_SUFFIXES.items():
+        file_path = files_by_stem.get("{}_{}".format(file_name, suffix))
+        if file_path is not None:
+            img = _load_image_for_role(file_path, our_key)
+            if img is not None:
+                images[our_key] = img
+    return images
+
+
+def _find_asset_bridge_images(mat: bpy.types.Material) -> "dict[str, bpy.types.Image]":
+    """Best-effort fallback for when there's no ambientCG .tres to read (e.g. a Poly Haven asset
+    imported through Asset Bridge) - walk the already-built material's node graph the normal way."""
+    images: dict[str, bpy.types.Image] = {}
+    diffuse = util.find_material_base_color_image(mat)
+    if diffuse is not None:
+        images["diffuse"] = diffuse
+    normal, metal = util.find_material_normal_and_metal_images(mat)
+    if normal is not None:
+        images["normal"] = normal
+    if metal is not None:
+        images["metal"] = metal
+    roughness = util.find_material_roughness_image(mat)
+    if roughness is not None:
+        images["roughness"] = roughness
+    displacement = util.find_material_displacement_image(mat)
+    if displacement is not None:
+        images["displacement"] = displacement
+    return images
+
+
+# Same association table Asset Bridge's own Poly Haven support uses (apis/polyhaven/ph_asset.py,
+# PH_Asset.import_asset) - kept identical rather than reinvented, since it's just the real, known
+# Poly Haven filename convention (<name>_<ph_name>_<quality>.<ext>). No "metal" entry - Poly Haven
+# materials don't ship a separate metalness map this way either, matching that same source.
+_POLYHAVEN_FILENAME_ROLES = {
+    "diffuse": {"diff", "col_1", "coll1", "col", "col_01"},
+    "displacement": {"disp"},
+    "normal": {"nor_gl"},
+    "roughness": {"rough"},
+}
+
+
+def _find_polyhaven_style_images(download_dir: object, name: str, quality_level: str) -> "dict[str, bpy.types.Image]":
+    """Fallback for Poly Haven assets pulled in through Asset Bridge - these ship as plain texture
+    files with no shared "<name>_<quality>" stem alongside them (confirmed live 2026-09-01: a real
+    Poly Haven download folder only has the bare image files), so _find_ambientcg_style_images'
+    suffix-after-quality convention doesn't apply. Matches files directly by Poly Haven's own
+    well-known naming convention instead (role token before the quality), exactly as Asset Bridge's
+    own Poly Haven code does it."""
+    from pathlib import Path
+    dir_path = cast(Path, download_dir)
+    if not dir_path.is_dir():
+        return {}
+    files_by_stem = {f.stem: f for f in dir_path.iterdir() if f.is_file()}
+    images: dict[str, bpy.types.Image] = {}
+    for our_key, ph_names in _POLYHAVEN_FILENAME_ROLES.items():
+        for ph_name in ph_names:
+            file_path = files_by_stem.get("{}_{}_{}".format(name, ph_name, quality_level))
+            if file_path is not None:
+                img = _load_image_for_role(file_path, our_key)
+                if img is not None:
+                    images[our_key] = img
+                break
+    return images
+
+
+def _try_force_download_asset_bridge_dummy(
+        asset: bpy.types.AssetRepresentation,
+        on_ready: "Callable[[dict[str, bpy.types.Image]], None]",
+        candidate_mat: "bpy.types.Material | None" = None) -> bool:
+    """If `asset` is an Asset Bridge dummy, trigger Asset Bridge's own download+import pipeline for
+    it directly - the same one a manual drag-and-drop into the scene would use - instead of
+    requiring the user to do that drag themselves first just so a later click can find something.
+    Once the download completes, resolves the real texture images (preferring a direct filename-
+    convention scan of the download folder - see _find_ambientcg_style_images/
+    _find_polyhaven_style_images - over Asset Bridge's own built material, since that material can
+    be stale/incomplete from an earlier interrupted import attempt still lingering in the file) and
+    calls `on_ready({role: Image})`. This can fire well after this function itself has returned -
+    downloads happen in the background.
+
+    `candidate_mat` lets a caller that has already resolved a material (possibly freshly appended
+    from the asset's library this same call, e.g. _load_asset_material) pass it in directly rather
+    than this function re-deriving it from `asset.local_id` independently, which isn't guaranteed
+    to reflect a just-appended datablock the same way. Falls back to `asset.local_id` if omitted.
+
+    Returns True if a download was actually kicked off - the caller should report "downloading..."
+    and finish, not its usual "not found" error, since this either lands real images via `on_ready`
+    shortly, or fails and reports its own error through Asset Bridge's own messaging.
+    Returns False if Asset Bridge isn't installed, this isn't one of its dummies, or it couldn't be
+    resolved for some other reason - the caller should fall through to its normal error message.
+    """
+    datablock = candidate_mat if candidate_mat is not None else asset.local_id
+    if not isinstance(datablock, bpy.types.Material):
+        return False
+    ab = getattr(datablock, "asset_bridge", None)
+    if ab is None or not getattr(ab, "is_dummy", False):
+        return False
+    idname = getattr(ab, "idname", "")
+    if not idname:
+        return False
+
+    try:
+        from asset_bridge.api import get_asset_lists  # pyright: ignore[reportMissingImports]
+        from asset_bridge.helpers.assets import download_and_import_asset  # pyright: ignore[reportMissingImports]
+        from asset_bridge.settings import get_ab_settings as get_asset_bridge_settings  # pyright: ignore[reportMissingImports]
+    except ImportError:
+        return False
+
+    asset_list_item = get_asset_lists().all_assets.get(idname)
+    if asset_list_item is None:
+        return False
+
+    context = bpy.context
+    quality = get_asset_bridge_settings(context).asset_quality
+    ab_asset = asset_list_item.to_asset(quality, "APPEND")
+    # file_name only exists on some Asset subclasses (e.g. ambientCG's, the "<name>_<quality>" file
+    # stem) - a Poly Haven asset pulled in through Asset Bridge has no such shared stem (confirmed
+    # live 2026-09-01, a real download folder only has the bare texture files), so there's nothing
+    # to look for that way, and it falls through to the Poly Haven suffix convention below instead.
+    file_name = getattr(ab_asset, "file_name", None)
+    download_dir = ab_asset.download_dir
+
+    def on_completion(imported: object):
+        images = _find_ambientcg_style_images(download_dir, file_name) if file_name else {}
+        if not images:
+            images = _find_polyhaven_style_images(download_dir, ab_asset.name, quality)
+        if not images and isinstance(imported, bpy.types.Material):
+            images = _find_asset_bridge_images(imported)
+        # Always call on_ready, even with an empty dict - each caller's on_ready already reports a
+        # clear "no usable image found in '<asset name>'" error via warn() when the role it needs is
+        # missing. Used to only call on_ready if images was non-empty, so a total failure (none of
+        # the 3 lookup methods found anything) silently produced no error at all - confirmed 2026-09-02.
+        on_ready(images)
+
+    download_and_import_asset(context, ab_asset, draw=True, on_completion=on_completion)
+    return True
+
+
 def _resolve_asset_image(asset: bpy.types.AssetRepresentation) -> bpy.types.Image | None:
     """The usable Image behind an Asset Browser asset - directly if it's an Image asset, or its
-    Base Color texture if it's a Material asset (see util.find_material_base_color_image).
-    Appends the asset's datablock from its source library first if it isn't already local to
-    this file (the normal case for an external library like Poly Haven's).
-    """
-    datablock = asset.local_id
-    if datablock is None:
-        if not asset.full_library_path:
-            return None
-        with bpy.data.libraries.load(asset.full_library_path, link=False) as (data_from, data_to):
-            if asset.id_type == "IMAGE" and asset.name in data_from.images:
-                data_to.images = [asset.name]
-            elif asset.id_type == "MATERIAL" and asset.name in data_from.materials:
-                data_to.materials = [asset.name]
-        if asset.id_type == "IMAGE":
-            datablock = data_to.images[0] if data_to.images else None
-        elif asset.id_type == "MATERIAL":
-            datablock = data_to.materials[0] if data_to.materials else None
-
+    Base Color texture if it's a Material asset (see util.find_material_base_color_image)."""
+    datablock = _resolve_asset_datablock(asset)
     if isinstance(datablock, bpy.types.Image):
         return datablock
     if isinstance(datablock, bpy.types.Material):
@@ -361,16 +552,46 @@ class XjSendAssetToImgGroup(bpy.types.Operator):
             self.report({"ERROR"}, "No asset selected")
             return {"CANCELLED"}
 
-        source_image = _resolve_asset_image(asset)
-        if source_image is None:
-            self.report({"ERROR"}, "Could not find a usable image in '{}'".format(asset.name))
-            return {"CANCELLED"}
-
         resolved = _resolve_target_imggroup(context)
         if isinstance(resolved, str):
             self.report({"ERROR"}, resolved)
             return {"CANCELLED"}
         group_tree, tex_image_node, target_mat = resolved
+
+        asset_name = asset.name
+
+        def on_ready(images: "dict[str, bpy.types.Image]"):
+            image = images.get("diffuse")
+            if image is None:
+                warn("Asset Bridge downloaded '{}' but no usable base color image was found in it.".format(asset_name))
+                return
+            tex_image_node.image = image
+            from . import xj
+            xj._wire_relief_composite(group_tree, tex_image_node, None, None)  # pyright: ignore[reportPrivateUsage]
+
+        # Resolved once here (local, or freshly appended from the library) so both the dummy check
+        # below and the normal fallback path see the exact same datablock, instead of each
+        # re-resolving independently - a freshly-appended-this-call datablock isn't guaranteed to
+        # show up via asset.local_id again on a second, separate resolve.
+        datablock = _resolve_asset_datablock(asset)
+
+        # Always force a fresh download+resolve for an Asset Bridge dummy, even if a "real" material
+        # matching it already exists somewhere in the file - confirmed live (2026-09-01) that reusing
+        # an already-existing one risks reusing a stale/incomplete result left behind by an earlier
+        # interrupted import (missing texture layers a fresh resolve correctly finds).
+        candidate_mat = datablock if isinstance(datablock, bpy.types.Material) else None
+        if _try_force_download_asset_bridge_dummy(asset, on_ready, candidate_mat=candidate_mat):
+            self.report({"INFO"}, "Downloading '{}' via Asset Bridge...".format(asset_name))
+            return {"FINISHED"}
+
+        source_image: bpy.types.Image | None = None
+        if isinstance(datablock, bpy.types.Image):
+            source_image = datablock
+        elif isinstance(datablock, bpy.types.Material):
+            source_image = util.find_material_base_color_image(datablock)
+        if source_image is None:
+            self.report({"ERROR"}, "Could not find a usable image in '{}'".format(asset.name))
+            return {"CANCELLED"}
 
         tex_image_node.image = source_image
         from . import xj
@@ -388,22 +609,13 @@ def draw_send_asset_to_imggroup_menu_item(self: bpy.types.Menu, context: Context
 
 
 def _load_asset_material(asset: bpy.types.AssetRepresentation) -> bpy.types.Material | None:
-    """The Material datablock behind an Asset Browser asset, appending it from its source library
-    first if it isn't already local to this file (the normal case for an external library like
-    Poly Haven's) - same "append if needed" logic _resolve_asset_image uses for the Material case,
-    kept separate rather than shared since this one needs the Material itself (to also look for
-    Normal/Metallic), not just its Base Color image."""
+    """The Material datablock behind an Asset Browser asset - like _resolve_asset_image, but returns
+    the Material itself (to also look for Normal/Metallic/Roughness/Displacement), not just its
+    Base Color image."""
     if asset.id_type != "MATERIAL":
         return None
-    datablock = asset.local_id
-    if datablock is None:
-        if not asset.full_library_path:
-            return None
-        with bpy.data.libraries.load(asset.full_library_path, link=False) as (data_from, data_to):
-            if asset.name in data_from.materials:
-                data_to.materials = [asset.name]
-        datablock = data_to.materials[0] if data_to.materials else None
-    return cast(bpy.types.Material, datablock) if isinstance(datablock, bpy.types.Material) else None
+    datablock = _resolve_asset_datablock(asset)
+    return datablock if isinstance(datablock, bpy.types.Material) else None
 
 
 @final
@@ -425,25 +637,50 @@ class XjSendAssetPackToImgGroup(bpy.types.Operator):
             self.report({"ERROR"}, "No asset selected")
             return {"CANCELLED"}
 
-        source_mat = _load_asset_material(asset)
-        if source_mat is None:
-            self.report({"ERROR"}, "Could not load a material from '{}'".format(asset.name))
-            return {"CANCELLED"}
-
-        diffuse_image = util.find_material_base_color_image(source_mat)
-        if diffuse_image is None:
-            self.report({"ERROR"}, "Could not find a base color image in '{}'".format(asset.name))
-            return {"CANCELLED"}
-
-        normal_image, metal_image = util.find_material_normal_and_metal_images(source_mat)
-        roughness_image = util.find_material_roughness_image(source_mat)
-        displacement_image = util.find_material_displacement_image(source_mat)
-
         resolved = _resolve_target_imggroup(context)
         if isinstance(resolved, str):
             self.report({"ERROR"}, resolved)
             return {"CANCELLED"}
         group_tree, tex_image_node, target_mat = resolved
+
+        asset_name = asset.name
+
+        def on_ready(images: "dict[str, bpy.types.Image]"):
+            image = images.get("diffuse")
+            if image is None:
+                warn("Asset Bridge downloaded '{}' but no usable base color image was found in it.".format(asset_name))
+                return
+            tex_image_node.image = image
+            from . import xj
+            xj._wire_relief_composite(  # pyright: ignore[reportPrivateUsage]
+                group_tree, tex_image_node,
+                images.get("normal"), images.get("metal"), images.get("roughness"), images.get("displacement"))
+
+        # Resolved once here (local, or freshly appended from the library) so both the dummy check
+        # below and the normal fallback path see the exact same datablock, instead of each
+        # re-resolving independently - a freshly-appended-this-call datablock isn't guaranteed to
+        # show up via asset.local_id again on a second, separate resolve.
+        source_mat = _load_asset_material(asset)
+
+        # Always force a fresh download+resolve for an Asset Bridge dummy, even if a "real" material
+        # matching it already exists somewhere in the file - confirmed live (2026-09-01) that reusing
+        # an already-existing one risks reusing a stale/incomplete result left behind by an earlier
+        # interrupted import (missing texture layers a fresh resolve correctly finds).
+        if _try_force_download_asset_bridge_dummy(asset, on_ready, candidate_mat=source_mat):
+            self.report({"INFO"}, "Downloading '{}' via Asset Bridge...".format(asset_name))
+            return {"FINISHED"}
+
+        diffuse_image = util.find_material_base_color_image(source_mat) if source_mat is not None else None
+        if diffuse_image is None:
+            if source_mat is None:
+                self.report({"ERROR"}, "Could not load a material from '{}'".format(asset.name))
+            else:
+                self.report({"ERROR"}, "Could not find a base color image in '{}'".format(asset.name))
+            return {"CANCELLED"}
+
+        normal_image, metal_image = util.find_material_normal_and_metal_images(source_mat)
+        roughness_image = util.find_material_roughness_image(source_mat)
+        displacement_image = util.find_material_displacement_image(source_mat)
 
         tex_image_node.image = diffuse_image
         from . import xj
